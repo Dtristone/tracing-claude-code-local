@@ -50,3 +50,7 @@ Thumbs.db
 # Project specific
 cc_transcript.jsonl
 *.log
+
+# Local trace storage
+.claude-trace/
+traces.db

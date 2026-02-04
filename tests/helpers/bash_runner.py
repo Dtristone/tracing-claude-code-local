@@ -14,7 +14,26 @@ from typing import Optional
 class BashRunner:
     """Execute bash functions from stop_hook.sh in isolation"""
 
-    def __init__(self, script_path: str = "/Users/tanushreesharma/tracing-claude-code/stop_hook.sh"):
+    # Default path relative to the repository root
+    DEFAULT_SCRIPT_PATH = None
+    
+    def __init__(self, script_path: str = None):
+        if script_path is None:
+            # Try to find stop_hook.sh in common locations
+            import pathlib
+            repo_root = pathlib.Path(__file__).parent.parent.parent
+            possible_paths = [
+                repo_root / "stop_hook.sh",
+                pathlib.Path.home() / "tracing-claude-code" / "stop_hook.sh",
+            ]
+            for path in possible_paths:
+                if path.exists():
+                    script_path = str(path)
+                    break
+            else:
+                # Use the repository path as default
+                script_path = str(repo_root / "stop_hook.sh")
+        
         self.script_path = script_path
         if not Path(script_path).exists():
             raise FileNotFoundError(f"Script not found: {script_path}")

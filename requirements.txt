@@ -1,0 +1,7 @@
+# Claude Code Local Tracing - Dependencies
+# No external dependencies required for core functionality.
+# SQLite is built into Python's standard library.
+
+# Optional development dependencies (install with pip install -e ".[dev]"):
+# pytest>=8.0.0
+# pytest-cov>=4.0.0
