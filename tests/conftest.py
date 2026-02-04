@@ -63,7 +63,7 @@ def bash_executor():
     Returns:
         BashRunner instance
     """
-    return BashRunner("/Users/tanushreesharma/tracing-claude-code/stop_hook.sh")
+    return BashRunner()  # Uses auto-detection
 
 
 @pytest.fixture
