@@ -111,13 +111,32 @@ def cmd_stats(args) -> int:
         total_tokens = storage.get_aggregate_token_usage()
         tool_stats = storage.get_tool_stats()
         
+        # Also get aggregate OTEL metrics
+        otel_aggregate = storage.get_aggregate_otel_metrics()
+        
+        # Use OTEL tokens if transcript tokens are 0
+        input_tokens = total_tokens.input_tokens
+        output_tokens = total_tokens.output_tokens
+        cache_read = total_tokens.cache_read_tokens
+        cache_hit_rate = total_tokens.cache_hit_rate
+        
+        if input_tokens == 0 and otel_aggregate.get('input_tokens', 0) > 0:
+            input_tokens = otel_aggregate['input_tokens']
+            output_tokens = otel_aggregate['output_tokens']
+            cache_read = otel_aggregate['cache_read_tokens']
+            cache_hit_rate = (cache_read / max(input_tokens, 1)) * 100
+        
         print(f"Aggregate Statistics ({len(sessions)} sessions)")
         print("")
         print("Token Usage:")
-        print(f"  Input Tokens:  {total_tokens.input_tokens:,}")
-        print(f"  Output Tokens: {total_tokens.output_tokens:,}")
-        print(f"  Cache Read:    {total_tokens.cache_read_tokens:,}")
-        print(f"  Cache Hit Rate: {total_tokens.cache_hit_rate:.1f}%")
+        print(f"  Input Tokens:  {input_tokens:,}")
+        print(f"  Output Tokens: {output_tokens:,}")
+        print(f"  Cache Read:    {cache_read:,}")
+        print(f"  Cache Hit Rate: {cache_hit_rate:.1f}%")
+        
+        if otel_aggregate.get('session_count', 0) > 0:
+            print(f"  (includes OTEL data from {otel_aggregate['session_count']} session(s))")
+        
         print("")
         print("Tool Usage:")
         for name, stats in tool_stats.items():
@@ -129,8 +148,10 @@ def cmd_stats(args) -> int:
             print(f"Session not found: {args.session_id}", file=sys.stderr)
             return 1
         
-        reporter = TraceReporter()
-        print(reporter.format_statistics(session))
+        # Use OTEL-enriched reporter
+        analyzer = TraceAnalyzer(storage)
+        reporter = TraceReporter(analyzer)
+        print(reporter.format_statistics_with_otel(session))
     
     return 0
 
@@ -296,6 +317,136 @@ def cmd_watch(args) -> int:
     return 0
 
 
+def cmd_otel(args) -> int:
+    """Show OTEL metrics for a session."""
+    storage = get_storage()
+    
+    if args.all:
+        # Show aggregate OTEL stats
+        aggregate = storage.get_aggregate_otel_metrics()
+        
+        if aggregate.get('session_count', 0) == 0:
+            print("No OTEL metrics found.")
+            print("\nTo collect OTEL metrics, run Claude Code with:")
+            print("  OTEL_METRICS_EXPORTER=console claude ...")
+            print("\nThen use: claude-trace otel-import <session_id> <otel_output_file>")
+            return 0
+        
+        print(f"Aggregate OTEL Metrics ({aggregate['session_count']} sessions)")
+        print("")
+        print("Token Usage:")
+        print(f"  Input Tokens:       {aggregate['input_tokens']:,}")
+        print(f"  Output Tokens:      {aggregate['output_tokens']:,}")
+        print(f"  Cache Read:         {aggregate['cache_read_tokens']:,}")
+        print(f"  Cache Created:      {aggregate['cache_creation_tokens']:,}")
+        print("")
+        print("API Metrics:")
+        print(f"  Total API Calls:    {aggregate['api_calls']:,}")
+        print(f"  Avg Latency:        {aggregate['api_latency_ms']:.1f}ms")
+        print(f"  Total Tool Calls:   {aggregate['tool_calls']:,}")
+        print(f"  Total Errors:       {aggregate['errors']:,}")
+    else:
+        # Check if we have OTEL metrics for this session (session may not exist)
+        analyzer = TraceAnalyzer(storage)
+        reporter = TraceReporter(analyzer)
+        
+        otel_analysis = analyzer.get_otel_analysis(args.session_id)
+        print(reporter.format_otel_metrics(args.session_id, otel_analysis))
+    
+    return 0
+
+
+def cmd_otel_import(args) -> int:
+    """Import OTEL metrics from console output file."""
+    from claude_trace.otel_collector import OtelMetricsCollector
+    
+    if not os.path.exists(args.otel_file):
+        print(f"File not found: {args.otel_file}", file=sys.stderr)
+        return 1
+    
+    storage = get_storage()
+    collector = OtelMetricsCollector()
+    
+    try:
+        # Collect from file
+        metrics = collector.collect_from_file(
+            args.otel_file,
+            session_id=args.session_id
+        )
+        
+        # Save to collector storage
+        collector.save_metrics(metrics)
+        
+        # Save to database
+        storage.save_otel_metrics(args.session_id, metrics.to_dict())
+        
+        print(f"OTEL metrics imported for session: {args.session_id}")
+        print("")
+        print(f"  Input Tokens:  {metrics.input_tokens:,}")
+        print(f"  Output Tokens: {metrics.output_tokens:,}")
+        print(f"  API Calls:     {metrics.api_calls}")
+        print(f"  Errors:        {metrics.errors}")
+        print(f"  Metrics Found: {len(metrics.metrics)}")
+        
+        if args.verbose:
+            print("\nMetrics:")
+            for name, metric in sorted(metrics.metrics.items()):
+                print(f"  {name}: {metric.total_value}")
+        
+    except Exception as e:
+        print(f"Error importing OTEL metrics: {e}", file=sys.stderr)
+        return 1
+    
+    return 0
+
+
+def cmd_otel_capture(args) -> int:
+    """Capture OTEL metrics from stdin (for use in hook scripts)."""
+    import sys as sys_module
+    from claude_trace.otel_collector import OtelMetricsCollector
+    
+    storage = get_storage()
+    collector = OtelMetricsCollector()
+    
+    # Read from stdin or file
+    if args.input_file:
+        if not os.path.exists(args.input_file):
+            print(f"File not found: {args.input_file}", file=sys.stderr)
+            return 1
+        with open(args.input_file, 'r') as f:
+            otel_output = f.read()
+    else:
+        otel_output = sys_module.stdin.read()
+    
+    if not otel_output.strip():
+        print("No OTEL output provided", file=sys.stderr)
+        return 1
+    
+    try:
+        # Collect metrics
+        metrics = collector.collect_from_output(otel_output, args.session_id)
+        
+        # Save raw output
+        collector.save_raw_output(otel_output, args.session_id)
+        
+        # Save parsed metrics
+        collector.save_metrics(metrics)
+        
+        # Save to database
+        storage.save_otel_metrics(args.session_id, metrics.to_dict())
+        
+        if not args.quiet:
+            print(f"OTEL metrics captured for session: {args.session_id}")
+            print(f"  Metrics: {len(metrics.metrics)}")
+            print(f"  Tokens: {metrics.input_tokens + metrics.output_tokens}")
+        
+    except Exception as e:
+        print(f"Error capturing OTEL metrics: {e}", file=sys.stderr)
+        return 1
+    
+    return 0
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -435,6 +586,63 @@ def main():
     )
     watch_parser.set_defaults(func=cmd_watch)
     
+    # otel command - view OTEL metrics
+    otel_parser = subparsers.add_parser(
+        "otel",
+        help="Show OTEL metrics for a session"
+    )
+    otel_parser.add_argument(
+        "session_id",
+        nargs="?",
+        help="Session ID (required unless --all is used)"
+    )
+    otel_parser.add_argument(
+        "--all", "-a",
+        action="store_true",
+        help="Show aggregate OTEL metrics for all sessions"
+    )
+    otel_parser.set_defaults(func=cmd_otel)
+    
+    # otel-import command - import from file
+    otel_import_parser = subparsers.add_parser(
+        "otel-import",
+        help="Import OTEL metrics from console output file"
+    )
+    otel_import_parser.add_argument(
+        "session_id",
+        help="Session ID to associate metrics with"
+    )
+    otel_import_parser.add_argument(
+        "otel_file",
+        help="Path to file containing OTEL console output"
+    )
+    otel_import_parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Show detailed metrics"
+    )
+    otel_import_parser.set_defaults(func=cmd_otel_import)
+    
+    # otel-capture command - capture from stdin
+    otel_capture_parser = subparsers.add_parser(
+        "otel-capture",
+        help="Capture OTEL metrics from stdin (for use in hooks)"
+    )
+    otel_capture_parser.add_argument(
+        "session_id",
+        help="Session ID to associate metrics with"
+    )
+    otel_capture_parser.add_argument(
+        "--input-file", "-i",
+        help="Read from file instead of stdin"
+    )
+    otel_capture_parser.add_argument(
+        "--quiet", "-q",
+        action="store_true",
+        help="Suppress output"
+    )
+    otel_capture_parser.set_defaults(func=cmd_otel_capture)
+    
     args = parser.parse_args()
     
     if not args.command:
@@ -443,6 +651,11 @@ def main():
     
     # Validate stats command
     if args.command == "stats" and not args.all and not args.session_id:
+        print("Error: session_id is required unless --all is used", file=sys.stderr)
+        return 1
+    
+    # Validate otel command
+    if args.command == "otel" and not args.all and not args.session_id:
         print("Error: session_id is required unless --all is used", file=sys.stderr)
         return 1
     
