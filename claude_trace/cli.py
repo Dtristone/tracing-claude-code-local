@@ -359,7 +359,7 @@ def cmd_otel(args) -> int:
 
 def cmd_otel_import(args) -> int:
     """Import OTEL metrics from console output file."""
-    from claude_trace.otel_collector import OtelMetricsCollector
+    from claude_trace.otel_collector import OtelMetricsCollector, OtelSessionMapping
     
     if not os.path.exists(args.otel_file):
         print(f"File not found: {args.otel_file}", file=sys.stderr)
@@ -367,6 +367,7 @@ def cmd_otel_import(args) -> int:
     
     storage = get_storage()
     collector = OtelMetricsCollector()
+    mapping = OtelSessionMapping()
     
     try:
         # Collect from file
@@ -381,6 +382,13 @@ def cmd_otel_import(args) -> int:
         # Save to database
         storage.save_otel_metrics(args.session_id, metrics.to_dict())
         
+        # Register the session mapping
+        mapping.register_session(
+            args.session_id, 
+            otel_log_file=os.path.abspath(args.otel_file),
+            description=f"Imported from {os.path.basename(args.otel_file)}"
+        )
+        
         print(f"OTEL metrics imported for session: {args.session_id}")
         print("")
         print(f"  Input Tokens:  {metrics.input_tokens:,}")
@@ -388,6 +396,7 @@ def cmd_otel_import(args) -> int:
         print(f"  API Calls:     {metrics.api_calls}")
         print(f"  Errors:        {metrics.errors}")
         print(f"  Metrics Found: {len(metrics.metrics)}")
+        print(f"  Log File:      {os.path.abspath(args.otel_file)}")
         
         if args.verbose:
             print("\nMetrics:")
@@ -404,10 +413,11 @@ def cmd_otel_import(args) -> int:
 def cmd_otel_capture(args) -> int:
     """Capture OTEL metrics from stdin (for use in hook scripts)."""
     import sys as sys_module
-    from claude_trace.otel_collector import OtelMetricsCollector
+    from claude_trace.otel_collector import OtelMetricsCollector, OtelSessionMapping
     
     storage = get_storage()
     collector = OtelMetricsCollector()
+    mapping = OtelSessionMapping()
     
     # Read from stdin or file
     if args.input_file:
@@ -427,8 +437,8 @@ def cmd_otel_capture(args) -> int:
         # Collect metrics
         metrics = collector.collect_from_output(otel_output, args.session_id)
         
-        # Save raw output
-        collector.save_raw_output(otel_output, args.session_id)
+        # Save raw output (this returns the path to the saved file)
+        raw_file_path = collector.save_raw_output(otel_output, args.session_id)
         
         # Save parsed metrics
         collector.save_metrics(metrics)
@@ -436,15 +446,133 @@ def cmd_otel_capture(args) -> int:
         # Save to database
         storage.save_otel_metrics(args.session_id, metrics.to_dict())
         
+        # Register the session mapping
+        otel_file = args.input_file if args.input_file else raw_file_path
+        mapping.register_session(
+            args.session_id,
+            otel_log_file=os.path.abspath(otel_file),
+            description="Captured from console output"
+        )
+        
         if not args.quiet:
             print(f"OTEL metrics captured for session: {args.session_id}")
             print(f"  Metrics: {len(metrics.metrics)}")
             print(f"  Tokens: {metrics.input_tokens + metrics.output_tokens}")
+            print(f"  Log File: {otel_file}")
         
     except Exception as e:
         print(f"Error capturing OTEL metrics: {e}", file=sys.stderr)
         return 1
     
+    return 0
+
+
+def cmd_otel_mapping(args) -> int:
+    """Manage OTEL session mappings."""
+    from claude_trace.otel_collector import OtelSessionMapping
+    
+    mapping = OtelSessionMapping()
+    
+    if args.action == "list":
+        # List all mappings
+        mappings = mapping.list_mappings()
+        
+        if not mappings:
+            print("No OTEL session mappings found.")
+            print("\nTo create a mapping, use:")
+            print("  claude-trace otel-mapping register <session_id>")
+            return 0
+        
+        print(f"OTEL Session Mappings ({len(mappings)} entries)")
+        print("")
+        print(f"{'Session ID':<40} {'Timestamp':<20} {'OTEL Log File'}")
+        print("-" * 100)
+        
+        for entry in mappings:
+            ts_str = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            print(f"{entry.session_id:<40} {ts_str:<20} {entry.otel_log_file}")
+        
+    elif args.action == "get":
+        # Get mapping for a specific session
+        if not args.session_id:
+            print("Error: session_id is required for 'get' action", file=sys.stderr)
+            return 1
+        
+        entry = mapping.get_mapping(args.session_id)
+        
+        if not entry:
+            print(f"No mapping found for session: {args.session_id}")
+            return 1
+        
+        print(f"Session: {entry.session_id}")
+        print(f"OTEL Log File: {entry.otel_log_file}")
+        print(f"Timestamp: {entry.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+        if entry.description:
+            print(f"Description: {entry.description}")
+        
+        # Check if file exists
+        if os.path.exists(entry.otel_log_file):
+            print(f"File Status: exists")
+        else:
+            print(f"File Status: not found")
+        
+    elif args.action == "register":
+        # Register a new mapping
+        if not args.session_id:
+            print("Error: session_id is required for 'register' action", file=sys.stderr)
+            return 1
+        
+        otel_file = mapping.register_session(
+            args.session_id,
+            otel_log_file=args.otel_file,
+            description=args.description or ""
+        )
+        
+        print(f"Registered session mapping:")
+        print(f"  Session ID: {args.session_id}")
+        print(f"  OTEL Log File: {otel_file}")
+        
+    elif args.action == "remove":
+        # Remove a mapping
+        if not args.session_id:
+            print("Error: session_id is required for 'remove' action", file=sys.stderr)
+            return 1
+        
+        if mapping.remove_mapping(args.session_id):
+            print(f"Removed mapping for session: {args.session_id}")
+        else:
+            print(f"No mapping found for session: {args.session_id}")
+            return 1
+        
+    elif args.action == "generate-path":
+        # Generate a default OTEL log file path for a session
+        if not args.session_id:
+            print("Error: session_id is required for 'generate-path' action", file=sys.stderr)
+            return 1
+        
+        otel_path = mapping.generate_otel_filepath(args.session_id)
+        print(otel_path)
+        
+    else:
+        print(f"Unknown action: {args.action}", file=sys.stderr)
+        return 1
+    
+    return 0
+
+
+def cmd_otel_auto(args) -> int:
+    """Get or generate an OTEL log file path for a session (for use in scripts)."""
+    from claude_trace.otel_collector import OtelSessionMapping
+    
+    mapping = OtelSessionMapping()
+    
+    # Get existing or create new path
+    otel_path = mapping.get_or_create_otel_file(
+        args.session_id,
+        description=args.description or "Auto-generated"
+    )
+    
+    print(otel_path)
     return 0
 
 
@@ -643,6 +771,46 @@ def main():
         help="Suppress output"
     )
     otel_capture_parser.set_defaults(func=cmd_otel_capture)
+    
+    # otel-mapping command - manage session mappings
+    otel_mapping_parser = subparsers.add_parser(
+        "otel-mapping",
+        help="Manage OTEL session to log file mappings"
+    )
+    otel_mapping_parser.add_argument(
+        "action",
+        choices=["list", "get", "register", "remove", "generate-path"],
+        help="Action to perform: list all mappings, get/register/remove a specific mapping, or generate a path"
+    )
+    otel_mapping_parser.add_argument(
+        "session_id",
+        nargs="?",
+        help="Session ID (required for get/register/remove/generate-path actions)"
+    )
+    otel_mapping_parser.add_argument(
+        "--otel-file", "-f",
+        help="OTEL log file path (optional for register, auto-generated if not provided)"
+    )
+    otel_mapping_parser.add_argument(
+        "--description", "-d",
+        help="Description for the mapping"
+    )
+    otel_mapping_parser.set_defaults(func=cmd_otel_mapping)
+    
+    # otel-auto command - get or generate OTEL log path (for scripts)
+    otel_auto_parser = subparsers.add_parser(
+        "otel-auto",
+        help="Get or generate OTEL log file path for a session (for use in scripts)"
+    )
+    otel_auto_parser.add_argument(
+        "session_id",
+        help="Session ID"
+    )
+    otel_auto_parser.add_argument(
+        "--description", "-d",
+        help="Description for new mappings"
+    )
+    otel_auto_parser.set_defaults(func=cmd_otel_auto)
     
     args = parser.parse_args()
     
