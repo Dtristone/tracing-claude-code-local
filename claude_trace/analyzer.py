@@ -202,8 +202,8 @@ class TraceAnalyzer:
                     summary.get('output_tokens', 0)
                 ),
                 "cache_hit_rate": (
-                    summary.get('cache_read_tokens', 0) / 
-                    max(summary.get('input_tokens', 1), 1) * 100
+                    (summary.get('cache_read_tokens', 0) / summary.get('input_tokens', 0) * 100)
+                    if summary.get('input_tokens', 0) > 0 else 0.0
                 ),
                 "api_calls": summary.get('api_calls', 0),
                 "api_latency_ms": summary.get('api_latency_ms', 0),

@@ -373,9 +373,51 @@ claude_code.tokens.output 250
         assert result is None
     
     def test_collect_from_nonexistent_file(self, collector):
-        """Test collecting from nonexistent file."""
-        with pytest.raises(FileNotFoundError):
-            collector.collect_from_file("/nonexistent/path.txt")
+        """Test collecting from nonexistent file raises FileNotFoundError with path."""
+        nonexistent_path = "/nonexistent/path.txt"
+        with pytest.raises(FileNotFoundError) as exc_info:
+            collector.collect_from_file(nonexistent_path)
+        assert nonexistent_path in str(exc_info.value)
+
+
+class TestOtelParserErrorHandling:
+    """Tests for OTEL parser error handling with malformed input."""
+    
+    @pytest.fixture
+    def parser(self):
+        return OtelMetricsParser()
+    
+    def test_parse_malformed_json(self, parser):
+        """Test parsing malformed JSON gracefully."""
+        output = '{"name": "metric", "invalid json here'
+        metrics = parser.parse_console_output(output)
+        # Should not crash, just return empty or partial results
+        assert isinstance(metrics, dict)
+    
+    def test_parse_invalid_metric_values(self, parser):
+        """Test parsing metrics with non-numeric values."""
+        output = 'metric_name abc'  # 'abc' is not a valid number
+        metrics = parser.parse_console_output(output)
+        # Should skip invalid lines
+        assert "metric_name" not in metrics
+    
+    def test_parse_mixed_valid_invalid(self, parser):
+        """Test parsing output with mix of valid and invalid lines."""
+        output = """
+metric1 100
+invalid_line_without_value
+metric2 200
+not_a_metric
+metric3 300
+"""
+        metrics = parser.parse_console_output(output)
+        # Should extract only valid metrics
+        assert "metric1" in metrics
+        assert "metric2" in metrics
+        assert "metric3" in metrics
+        assert metrics["metric1"].total_value == 100
+        assert metrics["metric2"].total_value == 200
+        assert metrics["metric3"].total_value == 300
 
 
 class TestOtelIntegrationWithStorage:

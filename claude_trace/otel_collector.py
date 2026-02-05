@@ -301,10 +301,17 @@ class OtelMetricsParser:
                 if 'timestamp' in point or 'time_unix_nano' in point:
                     ts_val = point.get('timestamp') or point.get('time_unix_nano')
                     if isinstance(ts_val, (int, float)):
-                        if ts_val > 1e18:  # Nanoseconds
-                            ts_val = ts_val / 1e9
-                        if ts_val > 1e12:  # Milliseconds
-                            ts_val = ts_val / 1e3
+                        # OTEL timestamps can be in nanoseconds, milliseconds, or seconds
+                        # Nanoseconds: > 1e18 (e.g., 1609459200000000000)
+                        NANOSECOND_THRESHOLD = 1e18
+                        # Milliseconds: > 1e12 (e.g., 1609459200000)
+                        MILLISECOND_THRESHOLD = 1e12
+                        
+                        if ts_val > NANOSECOND_THRESHOLD:
+                            ts_val = ts_val / 1e9  # Convert ns to seconds
+                        elif ts_val > MILLISECOND_THRESHOLD:
+                            ts_val = ts_val / 1e3  # Convert ms to seconds
+                        
                         try:
                             timestamp = datetime.fromtimestamp(ts_val)
                         except (ValueError, OSError):

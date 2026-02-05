@@ -124,7 +124,8 @@ def cmd_stats(args) -> int:
             input_tokens = otel_aggregate['input_tokens']
             output_tokens = otel_aggregate['output_tokens']
             cache_read = otel_aggregate['cache_read_tokens']
-            cache_hit_rate = (cache_read / max(input_tokens, 1)) * 100
+            # Only calculate cache hit rate if we have valid input tokens
+            cache_hit_rate = (cache_read / input_tokens * 100) if input_tokens > 0 else 0.0
         
         print(f"Aggregate Statistics ({len(sessions)} sessions)")
         print("")
