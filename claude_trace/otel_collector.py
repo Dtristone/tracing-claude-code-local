@@ -630,3 +630,282 @@ class OtelMetricsCollector:
         if os.path.exists(file_path):
             return file_path
         return None
+
+
+@dataclass
+class OtelSessionMappingEntry:
+    """Entry in the OTEL session mapping."""
+    session_id: str
+    otel_log_file: str
+    timestamp: datetime
+    description: str = ""
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "session_id": self.session_id,
+            "otel_log_file": self.otel_log_file,
+            "timestamp": self.timestamp.isoformat(),
+            "description": self.description
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "OtelSessionMappingEntry":
+        """Create from dictionary."""
+        timestamp = data.get("timestamp")
+        if isinstance(timestamp, str):
+            try:
+                timestamp = datetime.fromisoformat(timestamp)
+            except (ValueError, TypeError):
+                timestamp = datetime.now()
+        elif timestamp is None:
+            timestamp = datetime.now()
+        
+        return cls(
+            session_id=data.get("session_id", ""),
+            otel_log_file=data.get("otel_log_file", ""),
+            timestamp=timestamp,
+            description=data.get("description", "")
+        )
+
+
+class OtelSessionMapping:
+    """
+    Manager for session ID to OTEL log file mappings.
+    
+    Provides:
+    - Default naming convention for OTEL log files: {session_id}_{timestamp}_otel.txt
+    - Persistent mapping storage in JSON format
+    - Lookup of OTEL log files by session ID
+    - Automatic timestamp tracking
+    """
+    
+    DEFAULT_MAPPING_FILE = os.path.expanduser("~/.claude-trace/otel-session-mapping.json")
+    DEFAULT_OTEL_DIR = os.path.expanduser("~/.claude-trace/otel-metrics")
+    
+    def __init__(
+        self, 
+        mapping_file: Optional[str] = None,
+        otel_dir: Optional[str] = None
+    ):
+        """
+        Initialize the session mapping manager.
+        
+        Args:
+            mapping_file: Path to the mapping JSON file
+            otel_dir: Directory for OTEL log files
+        """
+        self.mapping_file = mapping_file or self.DEFAULT_MAPPING_FILE
+        self.otel_dir = otel_dir or self.DEFAULT_OTEL_DIR
+        self._mappings: Dict[str, OtelSessionMappingEntry] = {}
+        
+        # Ensure directories exist
+        os.makedirs(os.path.dirname(self.mapping_file), exist_ok=True)
+        os.makedirs(self.otel_dir, exist_ok=True)
+        
+        # Load existing mappings
+        self._load_mappings()
+    
+    def _load_mappings(self) -> None:
+        """Load mappings from the JSON file."""
+        if not os.path.exists(self.mapping_file):
+            return
+        
+        try:
+            with open(self.mapping_file, 'r') as f:
+                data = json.load(f)
+            
+            for entry_data in data.get("mappings", []):
+                entry = OtelSessionMappingEntry.from_dict(entry_data)
+                self._mappings[entry.session_id] = entry
+        except (json.JSONDecodeError, IOError):
+            # If file is corrupted, start fresh
+            self._mappings = {}
+    
+    def _save_mappings(self) -> None:
+        """Save mappings to the JSON file."""
+        data = {
+            "version": "1.0",
+            "updated_at": datetime.now().isoformat(),
+            "mappings": [entry.to_dict() for entry in self._mappings.values()]
+        }
+        
+        with open(self.mapping_file, 'w') as f:
+            json.dump(data, f, indent=2)
+    
+    def generate_otel_filename(
+        self, 
+        session_id: str, 
+        timestamp: Optional[datetime] = None
+    ) -> str:
+        """
+        Generate a default OTEL log filename for a session.
+        
+        Format: {session_id}_{YYYYMMDD_HHMMSS}_otel.txt
+        
+        Args:
+            session_id: Session ID
+            timestamp: Optional timestamp (uses current time if not provided)
+            
+        Returns:
+            Generated filename (not full path)
+        """
+        if timestamp is None:
+            timestamp = datetime.now()
+        
+        # Format timestamp for filename
+        ts_str = timestamp.strftime("%Y%m%d_%H%M%S")
+        
+        # Clean session_id to be filesystem-safe
+        safe_session_id = session_id.replace("/", "_").replace("\\", "_")
+        
+        return f"{safe_session_id}_{ts_str}_otel.txt"
+    
+    def generate_otel_filepath(
+        self, 
+        session_id: str, 
+        timestamp: Optional[datetime] = None
+    ) -> str:
+        """
+        Generate a full OTEL log file path for a session.
+        
+        Args:
+            session_id: Session ID
+            timestamp: Optional timestamp (uses current time if not provided)
+            
+        Returns:
+            Full path to the OTEL log file
+        """
+        filename = self.generate_otel_filename(session_id, timestamp)
+        return os.path.join(self.otel_dir, filename)
+    
+    def register_session(
+        self, 
+        session_id: str, 
+        otel_log_file: Optional[str] = None,
+        timestamp: Optional[datetime] = None,
+        description: str = ""
+    ) -> str:
+        """
+        Register a session with its OTEL log file mapping.
+        
+        If no otel_log_file is provided, generates one automatically.
+        
+        Args:
+            session_id: Session ID
+            otel_log_file: Path to the OTEL log file (generated if not provided)
+            timestamp: Timestamp for the mapping (uses current time if not provided)
+            description: Optional description for the mapping
+            
+        Returns:
+            Path to the OTEL log file (generated or provided)
+        """
+        if timestamp is None:
+            timestamp = datetime.now()
+        
+        if otel_log_file is None:
+            otel_log_file = self.generate_otel_filepath(session_id, timestamp)
+        
+        entry = OtelSessionMappingEntry(
+            session_id=session_id,
+            otel_log_file=otel_log_file,
+            timestamp=timestamp,
+            description=description
+        )
+        
+        self._mappings[session_id] = entry
+        self._save_mappings()
+        
+        return otel_log_file
+    
+    def get_otel_file(self, session_id: str) -> Optional[str]:
+        """
+        Get the OTEL log file path for a session.
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            Path to OTEL log file or None if not found
+        """
+        entry = self._mappings.get(session_id)
+        if entry:
+            return entry.otel_log_file
+        return None
+    
+    def get_mapping(self, session_id: str) -> Optional[OtelSessionMappingEntry]:
+        """
+        Get the full mapping entry for a session.
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            OtelSessionMappingEntry or None if not found
+        """
+        return self._mappings.get(session_id)
+    
+    def list_mappings(self) -> List[OtelSessionMappingEntry]:
+        """
+        List all session mappings.
+        
+        Returns:
+            List of OtelSessionMappingEntry objects, sorted by timestamp (newest first)
+        """
+        return sorted(
+            self._mappings.values(),
+            key=lambda e: e.timestamp,
+            reverse=True
+        )
+    
+    def remove_mapping(self, session_id: str) -> bool:
+        """
+        Remove a session mapping.
+        
+        Args:
+            session_id: Session ID to remove
+            
+        Returns:
+            True if mapping was removed, False if not found
+        """
+        if session_id in self._mappings:
+            del self._mappings[session_id]
+            self._save_mappings()
+            return True
+        return False
+    
+    def find_by_otel_file(self, otel_log_file: str) -> Optional[OtelSessionMappingEntry]:
+        """
+        Find a mapping by OTEL log file path.
+        
+        Args:
+            otel_log_file: Path to the OTEL log file
+            
+        Returns:
+            OtelSessionMappingEntry or None if not found
+        """
+        for entry in self._mappings.values():
+            if entry.otel_log_file == otel_log_file:
+                return entry
+        return None
+    
+    def get_or_create_otel_file(
+        self, 
+        session_id: str, 
+        description: str = ""
+    ) -> str:
+        """
+        Get existing OTEL log file for a session or create a new one.
+        
+        Args:
+            session_id: Session ID
+            description: Optional description if creating new mapping
+            
+        Returns:
+            Path to the OTEL log file
+        """
+        existing = self.get_otel_file(session_id)
+        if existing:
+            return existing
+        
+        return self.register_session(session_id, description=description)

@@ -160,6 +160,32 @@ The stats command automatically enriches token data from OTEL when transcript to
 claude-trace stats <session_id>
 ```
 
+### OTEL Session Mapping
+
+OTEL log files are automatically mapped to sessions with a default naming convention. You can manage these mappings:
+
+```bash
+# List all session mappings
+claude-trace otel-mapping list
+
+# Get mapping for a specific session
+claude-trace otel-mapping get <session_id>
+
+# Register a custom mapping
+claude-trace otel-mapping register <session_id> -f /path/to/otel.txt -d "Description"
+
+# Generate a default OTEL log file path
+claude-trace otel-mapping generate-path <session_id>
+
+# Get or create an OTEL log file path (for use in scripts)
+claude-trace otel-auto <session_id>
+```
+
+The mapping file is stored at `~/.claude-trace/otel-session-mapping.json` and contains:
+- Session ID to OTEL log file path mapping
+- Timestamp of when the mapping was created
+- Optional description
+
 ## Output Examples
 
 ### Timeline View
@@ -221,6 +247,8 @@ All trace data is stored locally in SQLite:
 
 - **Database Location**: `~/.claude-trace/traces.db`
 - **Hook Log**: `~/.claude-trace/hook.log`
+- **OTEL Session Mapping**: `~/.claude-trace/otel-session-mapping.json`
+- **OTEL Metrics Directory**: `~/.claude-trace/otel-metrics/`
 
 ### Database Schema
 
@@ -231,6 +259,24 @@ The database includes tables for:
 - `tool_uses`: Tool invocations with inputs, outputs, and timing
 - `otel_metrics`: OpenTelemetry metrics data points
 - `otel_session_summary`: Aggregated OTEL metrics per session
+
+### OTEL Session Mapping File
+
+The `otel-session-mapping.json` file stores mappings between session IDs and their corresponding OTEL log files:
+```json
+{
+  "version": "1.0",
+  "updated_at": "2025-02-04T10:30:00",
+  "mappings": [
+    {
+      "session_id": "abc-123-def",
+      "otel_log_file": "~/.claude-trace/otel-metrics/abc-123-def_20250204_103000_otel.txt",
+      "timestamp": "2025-02-04T10:30:00",
+      "description": "Auto-captured from hook"
+    }
+  ]
+}
+```
 
 ## Environment Variables
 

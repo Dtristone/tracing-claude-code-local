@@ -73,12 +73,30 @@ fi
 
 log "INFO" "Session $SESSION_ID processed successfully"
 
+# Get or generate OTEL log file path for this session using the mapping system
+OTEL_LOG_FILE=""
+if command -v claude-trace &> /dev/null; then
+    OTEL_LOG_FILE=$(claude-trace otel-auto "$SESSION_ID" --description "Auto-captured from hook" 2>/dev/null) || true
+elif [ -f "$SCRIPT_DIR/claude_trace/cli.py" ]; then
+    OTEL_LOG_FILE=$(python3 -m claude_trace.cli otel-auto "$SESSION_ID" --description "Auto-captured from hook" 2>/dev/null) || true
+fi
+
+if [ -n "$OTEL_LOG_FILE" ]; then
+    log "INFO" "Using OTEL log file: $OTEL_LOG_FILE"
+fi
+
 # Capture OTEL metrics if available
 # Check if OTEL console output file exists (created by OTEL_METRICS_EXPORTER=console)
 OTEL_OUTPUT_FILE="${OTEL_METRICS_OUTPUT:-$HOME/.claude-trace/otel-output.txt}"
 
 if [ -f "$OTEL_OUTPUT_FILE" ] && [ -s "$OTEL_OUTPUT_FILE" ]; then
     log "INFO" "Found OTEL metrics output, capturing for session $SESSION_ID"
+    
+    # Copy OTEL output to the mapped log file if available
+    if [ -n "$OTEL_LOG_FILE" ]; then
+        cp "$OTEL_OUTPUT_FILE" "$OTEL_LOG_FILE" 2>/dev/null || true
+        log "INFO" "Copied OTEL output to mapped log file: $OTEL_LOG_FILE"
+    fi
     
     # Import OTEL metrics
     if command -v claude-trace &> /dev/null; then
