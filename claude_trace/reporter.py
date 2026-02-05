@@ -309,6 +309,128 @@ class TraceReporter:
         
         return "\n".join(lines)
     
+    def format_otel_metrics(self, session_id: str, otel_analysis: Dict[str, Any]) -> str:
+        """
+        Format OTEL metrics for display.
+        
+        Args:
+            session_id: Session ID
+            otel_analysis: OTEL analysis data from analyzer
+            
+        Returns:
+            Formatted OTEL metrics string
+        """
+        if not otel_analysis.get('available', False):
+            return f"No OTEL metrics available for session: {session_id}"
+        
+        summary = otel_analysis.get('summary', {})
+        metrics = otel_analysis.get('metrics', {})
+        
+        lines = [
+            f"OTEL Metrics: {session_id}",
+            f"Collected: {otel_analysis.get('collected_at', 'N/A')}",
+            "",
+            "Token Usage (from OTEL):",
+            f"  Input Tokens:       {format_tokens(summary.get('input_tokens', 0))}",
+            f"  Output Tokens:      {format_tokens(summary.get('output_tokens', 0))}",
+            f"  Total Tokens:       {format_tokens(summary.get('total_tokens', 0))}",
+            f"  Cache Read:         {format_tokens(summary.get('cache_read_tokens', 0))}",
+            f"  Cache Created:      {format_tokens(summary.get('cache_creation_tokens', 0))}",
+            f"  Cache Hit Rate:     {format_percentage(summary.get('cache_hit_rate', 0))}",
+            "",
+            "API Metrics:",
+            f"  API Calls:          {summary.get('api_calls', 0)}",
+            f"  Avg Latency:        {format_duration(int(summary.get('api_latency_ms', 0)))}",
+            f"  Tool Calls:         {summary.get('tool_calls', 0)}",
+            f"  Errors:             {summary.get('errors', 0)}",
+        ]
+        
+        if metrics:
+            lines.extend(["", "All Metrics:"])
+            for name, data in sorted(metrics.items()):
+                unit = f" ({data.get('unit', '')})" if data.get('unit') else ""
+                lines.append(
+                    f"  {name}{unit}: total={data.get('total', 0):.2f}, "
+                    f"avg={data.get('avg', 0):.2f}, count={data.get('count', 0)}"
+                )
+        
+        return "\n".join(lines)
+    
+    def format_statistics_with_otel(
+        self, 
+        session: Session,
+        include_otel: bool = True
+    ) -> str:
+        """
+        Format detailed statistics for a session, including OTEL metrics.
+        
+        Args:
+            session: Session to format
+            include_otel: Whether to include OTEL metrics if available
+            
+        Returns:
+            Formatted statistics string
+        """
+        # Use OTEL-enriched stats if available
+        if include_otel:
+            stats = self.analyzer.analyze_session_with_otel(session)
+        else:
+            stats = self.analyzer.analyze_session(session)
+        
+        time_breakdown = self.analyzer.get_time_breakdown(session)
+        
+        lines = [
+            f"Session Statistics: {session.session_id}",
+            "",
+            "Time Breakdown:",
+            f"  Total Duration:     {time_breakdown['total_formatted']}",
+            f"  Model Inference:    {time_breakdown['model_time_formatted']} "
+            f"({format_percentage(time_breakdown['model_time_percent'])})",
+            f"  Tool Execution:     {time_breakdown['tool_time_formatted']} "
+            f"({format_percentage(time_breakdown['tool_time_percent'])})",
+            "",
+            "Token Usage:",
+            f"  Input Tokens:       {format_tokens(stats.total_tokens.input_tokens)}",
+            f"  Output Tokens:      {format_tokens(stats.total_tokens.output_tokens)}",
+            f"  Cache Read:         {format_tokens(stats.total_tokens.cache_read_tokens)} "
+            f"({format_percentage(stats.cache_hit_rate)} hit rate)",
+            f"  Cache Created:      {format_tokens(stats.total_tokens.cache_creation_tokens)}",
+        ]
+        
+        # Check if we have OTEL data
+        has_otel = False
+        if self.analyzer.storage:
+            has_otel = self.analyzer.storage.has_otel_metrics(session.session_id)
+        
+        if has_otel:
+            lines.append("  (enriched with OTEL metrics)")
+        
+        lines.extend([
+            "",
+            "Tool Usage:",
+        ])
+        
+        for name, tool_stats in stats.tool_usage_breakdown.items():
+            avg_duration = format_duration(int(tool_stats.avg_duration_ms))
+            total_duration = format_duration(tool_stats.total_duration_ms)
+            lines.append(
+                f"  {name:12s} {tool_stats.call_count:3d} calls, "
+                f"avg {avg_duration:>8s}, total {total_duration:>8s}"
+            )
+        
+        if not stats.tool_usage_breakdown:
+            lines.append("  (no tools used)")
+        
+        lines.extend([
+            "",
+            "Performance:",
+            f"  Avg Response Latency: {format_duration(int(stats.avg_response_latency_ms))}",
+            f"  Retry Count: {stats.retry_count}",
+            f"  Error Count: {stats.error_count}",
+        ])
+        
+        return "\n".join(lines)
+    
     def export_json(self, session: Session) -> str:
         """
         Export session data as JSON.

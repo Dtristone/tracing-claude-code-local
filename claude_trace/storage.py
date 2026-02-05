@@ -120,6 +120,41 @@ class TraceStorage:
                 )
             """)
             
+            # OTEL metrics table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS otel_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    metric_name TEXT NOT NULL,
+                    metric_value REAL NOT NULL,
+                    metric_type TEXT DEFAULT 'counter',
+                    unit TEXT,
+                    description TEXT,
+                    attributes TEXT,
+                    timestamp TEXT,
+                    collected_at TEXT NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                )
+            """)
+            
+            # OTEL session summary table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS otel_session_summary (
+                    session_id TEXT PRIMARY KEY,
+                    input_tokens INTEGER DEFAULT 0,
+                    output_tokens INTEGER DEFAULT 0,
+                    cache_read_tokens INTEGER DEFAULT 0,
+                    cache_creation_tokens INTEGER DEFAULT 0,
+                    api_calls INTEGER DEFAULT 0,
+                    api_latency_ms REAL DEFAULT 0,
+                    tool_calls INTEGER DEFAULT 0,
+                    errors INTEGER DEFAULT 0,
+                    raw_output TEXT,
+                    collected_at TEXT,
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                )
+            """)
+            
             # Create indexes
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_turns_session 
@@ -140,6 +175,14 @@ class TraceStorage:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_sessions_start_time 
                 ON sessions(start_time)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_otel_metrics_session 
+                ON otel_metrics(session_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_otel_metrics_name 
+                ON otel_metrics(metric_name)
             """)
             
             conn.commit()
@@ -594,5 +637,201 @@ class TraceStorage:
                 cache_read_tokens=row["total_cache_read"] or 0,
                 cache_creation_tokens=row["total_cache_creation"] or 0
             )
+        finally:
+            conn.close()
+    
+    def save_otel_metrics(self, session_id: str, metrics_data: Dict[str, Any]) -> None:
+        """
+        Save OTEL metrics for a session.
+        
+        Args:
+            session_id: Session ID
+            metrics_data: Dictionary with metrics data from OtelSessionMetrics.to_dict()
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Save summary
+            summary = metrics_data.get('summary', {})
+            collected_at = metrics_data.get('collected_at') or datetime.now().isoformat()
+            
+            cursor.execute("""
+                INSERT OR REPLACE INTO otel_session_summary
+                (session_id, input_tokens, output_tokens, cache_read_tokens,
+                 cache_creation_tokens, api_calls, api_latency_ms, tool_calls,
+                 errors, collected_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                session_id,
+                summary.get('input_tokens', 0),
+                summary.get('output_tokens', 0),
+                summary.get('cache_read_tokens', 0),
+                summary.get('cache_creation_tokens', 0),
+                summary.get('api_calls', 0),
+                summary.get('api_latency_ms', 0),
+                summary.get('tool_calls', 0),
+                summary.get('errors', 0),
+                collected_at
+            ))
+            
+            # Save individual metrics
+            for name, metric in metrics_data.get('metrics', {}).items():
+                for dp in metric.get('data_points', []):
+                    cursor.execute("""
+                        INSERT INTO otel_metrics
+                        (session_id, metric_name, metric_value, metric_type,
+                         unit, description, attributes, timestamp, collected_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        session_id,
+                        name,
+                        dp.get('value', 0),
+                        metric.get('type', 'counter'),
+                        metric.get('unit', ''),
+                        metric.get('description', ''),
+                        json.dumps(dp.get('attributes', {})),
+                        dp.get('timestamp'),
+                        collected_at
+                    ))
+            
+            conn.commit()
+        finally:
+            conn.close()
+    
+    def get_otel_summary(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get OTEL metrics summary for a session.
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            Dictionary with OTEL summary or None if not found
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            cursor.execute(
+                "SELECT * FROM otel_session_summary WHERE session_id = ?",
+                (session_id,)
+            )
+            row = cursor.fetchone()
+            
+            if not row:
+                return None
+            
+            return {
+                "session_id": row["session_id"],
+                "input_tokens": row["input_tokens"],
+                "output_tokens": row["output_tokens"],
+                "cache_read_tokens": row["cache_read_tokens"],
+                "cache_creation_tokens": row["cache_creation_tokens"],
+                "api_calls": row["api_calls"],
+                "api_latency_ms": row["api_latency_ms"],
+                "tool_calls": row["tool_calls"],
+                "errors": row["errors"],
+                "collected_at": row["collected_at"]
+            }
+        finally:
+            conn.close()
+    
+    def get_otel_metrics(self, session_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all OTEL metrics for a session.
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            List of metric dictionaries
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            cursor.execute(
+                """SELECT * FROM otel_metrics WHERE session_id = ? 
+                   ORDER BY metric_name, timestamp""",
+                (session_id,)
+            )
+            
+            metrics = []
+            for row in cursor.fetchall():
+                metrics.append({
+                    "metric_name": row["metric_name"],
+                    "metric_value": row["metric_value"],
+                    "metric_type": row["metric_type"],
+                    "unit": row["unit"],
+                    "description": row["description"],
+                    "attributes": json.loads(row["attributes"]) if row["attributes"] else {},
+                    "timestamp": row["timestamp"],
+                    "collected_at": row["collected_at"]
+                })
+            
+            return metrics
+        finally:
+            conn.close()
+    
+    def get_aggregate_otel_metrics(self) -> Dict[str, Any]:
+        """
+        Get aggregate OTEL metrics across all sessions.
+        
+        Returns:
+            Dictionary with aggregate metrics
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT 
+                    SUM(input_tokens) as total_input_tokens,
+                    SUM(output_tokens) as total_output_tokens,
+                    SUM(cache_read_tokens) as total_cache_read_tokens,
+                    SUM(cache_creation_tokens) as total_cache_creation_tokens,
+                    SUM(api_calls) as total_api_calls,
+                    AVG(api_latency_ms) as avg_api_latency_ms,
+                    SUM(tool_calls) as total_tool_calls,
+                    SUM(errors) as total_errors,
+                    COUNT(*) as session_count
+                FROM otel_session_summary
+            """)
+            
+            row = cursor.fetchone()
+            
+            return {
+                "input_tokens": row["total_input_tokens"] or 0,
+                "output_tokens": row["total_output_tokens"] or 0,
+                "cache_read_tokens": row["total_cache_read_tokens"] or 0,
+                "cache_creation_tokens": row["total_cache_creation_tokens"] or 0,
+                "api_calls": row["total_api_calls"] or 0,
+                "api_latency_ms": row["avg_api_latency_ms"] or 0,
+                "tool_calls": row["total_tool_calls"] or 0,
+                "errors": row["total_errors"] or 0,
+                "session_count": row["session_count"] or 0
+            }
+        finally:
+            conn.close()
+    
+    def has_otel_metrics(self, session_id: str) -> bool:
+        """
+        Check if a session has OTEL metrics.
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            True if session has OTEL metrics
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM otel_session_summary WHERE session_id = ?",
+                (session_id,)
+            )
+            return cursor.fetchone() is not None
         finally:
             conn.close()

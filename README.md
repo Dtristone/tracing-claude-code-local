@@ -11,6 +11,7 @@ A **100% local** tracing solution for [Claude Code CLI](https://docs.anthropic.c
 - ⏱️ **Time Breakdown**: Understand where time is spent (model vs tools)
 - 📁 **Export Options**: JSON and HTML reports
 - 🔄 **Live Watch Mode**: Monitor sessions in real-time
+- 📡 **OTEL Metrics**: Capture OpenTelemetry metrics locally when transcript tokens are missing
 
 ## Quick Start
 
@@ -134,6 +135,31 @@ claude-trace watch
 claude-trace watch --transcript /path/to/session.jsonl
 ```
 
+### OTEL Metrics (for Missing Token Data)
+
+When transcript files have zero token counts, you can capture OTEL metrics from Claude Code:
+
+```bash
+# Run Claude Code with OTEL console exporter
+OTEL_METRICS_EXPORTER=console claude ... 2>&1 | tee /tmp/otel_output.txt
+
+# Import OTEL metrics for a session
+claude-trace otel-import <session_id> /tmp/otel_output.txt
+
+# View OTEL metrics for a session
+claude-trace otel <session_id>
+
+# View aggregate OTEL metrics
+claude-trace otel --all
+```
+
+The stats command automatically enriches token data from OTEL when transcript tokens are 0:
+
+```bash
+# Stats will show OTEL token data when transcript tokens are missing
+claude-trace stats <session_id>
+```
+
 ## Output Examples
 
 ### Timeline View
@@ -203,6 +229,8 @@ The database includes tables for:
 - `turns`: Conversation turns
 - `messages`: User and assistant messages with token usage
 - `tool_uses`: Tool invocations with inputs, outputs, and timing
+- `otel_metrics`: OpenTelemetry metrics data points
+- `otel_session_summary`: Aggregated OTEL metrics per session
 
 ## Environment Variables
 
@@ -211,6 +239,8 @@ The database includes tables for:
 | `CLAUDE_TRACE_ENABLED` | Enable/disable local tracing | `true` |
 | `CLAUDE_TRACE_DEBUG` | Enable debug logging | `false` |
 | `CLAUDE_TRACE_LOG` | Log file path | `~/.claude-trace/hook.log` |
+| `CLAUDE_TRACE_OTEL_DIR` | Directory for OTEL metrics files | `~/.claude-trace/otel-metrics` |
+| `OTEL_METRICS_OUTPUT` | Path to OTEL console output file (for hook) | `~/.claude-trace/otel-output.txt` |
 
 ## Architecture
 

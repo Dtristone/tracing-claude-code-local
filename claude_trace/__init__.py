@@ -3,6 +3,10 @@ Claude Code Local Tracing
 
 A local-only tracing solution for Claude Code CLI that captures detailed traces
 without requiring any remote server connections.
+
+Supports:
+- Transcript-based tracing from JSONL files
+- OTEL metrics capture for token usage when OTEL_METRICS_EXPORTER=console
 """
 
 __version__ = "0.1.0"
@@ -21,8 +25,16 @@ from claude_trace.models import (
 from claude_trace.collector import TraceCollector
 from claude_trace.analyzer import TraceAnalyzer
 from claude_trace.storage import TraceStorage
+from claude_trace.otel_collector import (
+    OtelMetricsCollector,
+    OtelMetricsParser,
+    OtelSessionMetrics,
+    OtelMetric,
+    OtelMetricDataPoint,
+)
 
 __all__ = [
+    # Models
     "Session",
     "Turn",
     "Message",
@@ -31,7 +43,14 @@ __all__ = [
     "TokenUsage",
     "SessionStats",
     "ToolStats",
+    # Core components
     "TraceCollector",
     "TraceAnalyzer",
     "TraceStorage",
+    # OTEL components
+    "OtelMetricsCollector",
+    "OtelMetricsParser",
+    "OtelSessionMetrics",
+    "OtelMetric",
+    "OtelMetricDataPoint",
 ]

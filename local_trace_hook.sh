@@ -2,16 +2,19 @@
 ###
 # Claude Code Local Trace Hook
 # Collects trace data locally without sending to any external server.
+# Also captures OTEL metrics when OTEL_METRICS_EXPORTER=console is set.
 ###
 
 set -e
 
 # Config
 LOG_FILE="${CLAUDE_TRACE_LOG:-$HOME/.claude-trace/hook.log}"
+LOCAL_OTEL_DIR="${CLAUDE_TRACE_OTEL_DIR:-$HOME/.claude-trace/otel-metrics}"
 DEBUG="${CLAUDE_TRACE_DEBUG:-false}"
 
-# Ensure log directory exists
+# Ensure directories exist
 mkdir -p "$(dirname "$LOG_FILE")"
+mkdir -p "$LOCAL_OTEL_DIR"
 
 # Logging functions
 log() {
@@ -69,4 +72,46 @@ else
 fi
 
 log "INFO" "Session $SESSION_ID processed successfully"
+
+# Capture OTEL metrics if available
+# Check if OTEL console output file exists (created by OTEL_METRICS_EXPORTER=console)
+OTEL_OUTPUT_FILE="${OTEL_METRICS_OUTPUT:-$HOME/.claude-trace/otel-output.txt}"
+
+if [ -f "$OTEL_OUTPUT_FILE" ] && [ -s "$OTEL_OUTPUT_FILE" ]; then
+    log "INFO" "Found OTEL metrics output, capturing for session $SESSION_ID"
+    
+    # Import OTEL metrics
+    if command -v claude-trace &> /dev/null; then
+        claude-trace otel-capture "$SESSION_ID" --input-file "$OTEL_OUTPUT_FILE" --quiet >> "$LOG_FILE" 2>&1 || {
+            log "WARN" "Failed to capture OTEL metrics"
+        }
+    elif [ -f "$SCRIPT_DIR/claude_trace/cli.py" ]; then
+        python3 -m claude_trace.cli otel-capture "$SESSION_ID" --input-file "$OTEL_OUTPUT_FILE" --quiet >> "$LOG_FILE" 2>&1 || {
+            log "WARN" "Failed to capture OTEL metrics with Python"
+        }
+    fi
+    
+    # Archive the OTEL output
+    mv "$OTEL_OUTPUT_FILE" "$LOCAL_OTEL_DIR/${SESSION_ID}_raw.txt" 2>/dev/null || true
+    log "INFO" "OTEL metrics captured and archived for session $SESSION_ID"
+fi
+
+# Also check for session-specific OTEL file (alternative naming)
+SESSION_OTEL_FILE="$LOCAL_OTEL_DIR/${SESSION_ID}_otel.txt"
+if [ -f "$SESSION_OTEL_FILE" ] && [ -s "$SESSION_OTEL_FILE" ]; then
+    log "INFO" "Found session-specific OTEL file, capturing for session $SESSION_ID"
+    
+    if command -v claude-trace &> /dev/null; then
+        claude-trace otel-capture "$SESSION_ID" --input-file "$SESSION_OTEL_FILE" --quiet >> "$LOG_FILE" 2>&1 || {
+            log "WARN" "Failed to capture session OTEL metrics"
+        }
+    elif [ -f "$SCRIPT_DIR/claude_trace/cli.py" ]; then
+        python3 -m claude_trace.cli otel-capture "$SESSION_ID" --input-file "$SESSION_OTEL_FILE" --quiet >> "$LOG_FILE" 2>&1 || {
+            log "WARN" "Failed to capture session OTEL metrics with Python"
+        }
+    fi
+    
+    log "INFO" "Session OTEL metrics captured for session $SESSION_ID"
+fi
+
 exit 0

@@ -102,6 +102,117 @@ class TraceAnalyzer:
         
         return stats
     
+    def analyze_session_with_otel(
+        self, 
+        session: Session,
+        otel_summary: Optional[Dict[str, Any]] = None
+    ) -> SessionStats:
+        """
+        Compute comprehensive statistics for a session, enriched with OTEL metrics.
+        
+        When transcript token counts are 0, uses OTEL metrics instead.
+        
+        Args:
+            session: Session to analyze
+            otel_summary: Optional OTEL metrics summary from storage
+            
+        Returns:
+            SessionStats with computed metrics, enriched with OTEL data
+        """
+        stats = self.analyze_session(session)
+        
+        # If no OTEL data, return standard stats
+        if not otel_summary:
+            if self.storage:
+                otel_summary = self.storage.get_otel_summary(session.session_id)
+            if not otel_summary:
+                return stats
+        
+        # Enrich stats with OTEL data when transcript data is missing/zero
+        otel_tokens = TokenUsage(
+            input_tokens=otel_summary.get('input_tokens', 0),
+            output_tokens=otel_summary.get('output_tokens', 0),
+            cache_read_tokens=otel_summary.get('cache_read_tokens', 0),
+            cache_creation_tokens=otel_summary.get('cache_creation_tokens', 0)
+        )
+        
+        # If transcript tokens are 0, use OTEL tokens
+        if stats.total_tokens.total_tokens == 0 and otel_tokens.total_tokens > 0:
+            stats.total_tokens = otel_tokens
+        
+        # Add OTEL-specific metrics if available
+        if otel_summary.get('api_latency_ms', 0) > 0:
+            if stats.avg_response_latency_ms == 0:
+                stats.avg_response_latency_ms = otel_summary['api_latency_ms']
+        
+        if otel_summary.get('errors', 0) > stats.error_count:
+            stats.error_count = otel_summary['errors']
+        
+        return stats
+    
+    def get_otel_analysis(self, session_id: str) -> Dict[str, Any]:
+        """
+        Get OTEL-specific analysis for a session.
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            Dictionary with OTEL analysis
+        """
+        if not self.storage:
+            return {"error": "No storage configured"}
+        
+        summary = self.storage.get_otel_summary(session_id)
+        metrics = self.storage.get_otel_metrics(session_id)
+        
+        if not summary:
+            return {"available": False, "message": "No OTEL metrics for this session"}
+        
+        # Group metrics by name
+        metrics_by_name = defaultdict(list)
+        for m in metrics:
+            metrics_by_name[m['metric_name']].append(m)
+        
+        # Calculate statistics per metric
+        metrics_analysis = {}
+        for name, data_points in metrics_by_name.items():
+            values = [dp['metric_value'] for dp in data_points]
+            metrics_analysis[name] = {
+                "count": len(values),
+                "total": sum(values),
+                "avg": sum(values) / len(values) if values else 0,
+                "min": min(values) if values else 0,
+                "max": max(values) if values else 0,
+                "type": data_points[0].get('metric_type', 'counter') if data_points else 'counter',
+                "unit": data_points[0].get('unit', '') if data_points else ''
+            }
+        
+        return {
+            "available": True,
+            "session_id": session_id,
+            "collected_at": summary.get('collected_at'),
+            "summary": {
+                "input_tokens": summary.get('input_tokens', 0),
+                "output_tokens": summary.get('output_tokens', 0),
+                "cache_read_tokens": summary.get('cache_read_tokens', 0),
+                "cache_creation_tokens": summary.get('cache_creation_tokens', 0),
+                "total_tokens": (
+                    summary.get('input_tokens', 0) + 
+                    summary.get('output_tokens', 0)
+                ),
+                "cache_hit_rate": (
+                    (summary.get('cache_read_tokens', 0) / summary.get('input_tokens', 0) * 100)
+                    if summary.get('input_tokens', 0) > 0 else 0.0
+                ),
+                "api_calls": summary.get('api_calls', 0),
+                "api_latency_ms": summary.get('api_latency_ms', 0),
+                "tool_calls": summary.get('tool_calls', 0),
+                "errors": summary.get('errors', 0)
+            },
+            "metrics": metrics_analysis
+        }
+    
     def get_timeline(self, session: Session) -> List[Dict[str, Any]]:
         """
         Generate a timeline of events for a session.
