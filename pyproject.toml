@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-trace"
+version = "0.1.0"
+description = "Local tracing solution for Claude Code CLI"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Claude Trace Contributors"}
+]
+requires-python = ">=3.8"
+keywords = ["claude", "tracing", "monitoring", "debugging", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Monitoring",
+]
+# No external dependencies - SQLite is built into Python
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+claude-trace = "claude_trace.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Dtristone/tracing-claude-code-local"
+Repository = "https://github.com/Dtristone/tracing-claude-code-local"
+
+[tool.setuptools]
+packages = ["claude_trace"]
+
+[tool.setuptools.package-data]
+claude_trace = ["py.typed"]
