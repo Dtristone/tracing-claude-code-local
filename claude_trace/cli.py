@@ -576,6 +576,357 @@ def cmd_otel_auto(args) -> int:
     return 0
 
 
+def cmd_resource(args) -> int:
+    """Show resource usage for a session."""
+    storage = get_storage()
+    
+    if not storage.has_resource_data(args.session_id):
+        print(f"No resource data found for session: {args.session_id}")
+        print("\nResource monitoring data is collected when monitoring is enabled during session.")
+        return 1
+    
+    # Get resource summary
+    summary = storage.get_session_resource_summary(args.session_id)
+    
+    if args.verbose:
+        # Show detailed snapshots
+        snapshots = storage.get_resource_snapshots(args.session_id)
+        print(f"Resource Snapshots: {args.session_id}")
+        print(f"Total Snapshots: {len(snapshots)}")
+        print("")
+        print(f"{'Timestamp':<26} {'CPU':>8} {'Memory':>8} {'Net Recv':>12} {'Net Sent':>12}")
+        print("-" * 70)
+        
+        for snap in snapshots[:50]:  # Limit to 50 for display
+            from claude_trace.utils import format_bytes
+            ts = snap.get("timestamp", "")[:19]
+            cpu = f"{snap.get('cpu_percent', 0):.1f}%"
+            mem = f"{snap.get('memory_percent', 0):.1f}%"
+            net_recv = format_bytes(snap.get("network_bytes_recv", 0))
+            net_sent = format_bytes(snap.get("network_bytes_sent", 0))
+            print(f"{ts:<26} {cpu:>8} {mem:>8} {net_recv:>12} {net_sent:>12}")
+        
+        if len(snapshots) > 50:
+            print(f"... and {len(snapshots) - 50} more snapshots")
+    else:
+        # Show summary
+        from claude_trace.utils import format_bytes, format_duration
+        
+        print(f"Resource Summary: {args.session_id}")
+        print("")
+        print("CPU Usage:")
+        print(f"  Average: {summary.get('cpu', {}).get('avg_percent', 0):.1f}%")
+        print(f"  Maximum: {summary.get('cpu', {}).get('max_percent', 0):.1f}%")
+        print("")
+        print("Memory Usage:")
+        print(f"  Average: {summary.get('memory', {}).get('avg_percent', 0):.1f}%")
+        print(f"  Maximum: {summary.get('memory', {}).get('max_percent', 0):.1f}%")
+        print(f"  Max Used: {format_bytes(summary.get('memory', {}).get('max_bytes', 0))}")
+        print(f"  Delta: {format_bytes(abs(summary.get('memory', {}).get('delta_bytes', 0)))}")
+        print("")
+        print("Network:")
+        print(f"  Received: {format_bytes(summary.get('network', {}).get('bytes_recv', 0))}")
+        print(f"  Sent: {format_bytes(summary.get('network', {}).get('bytes_sent', 0))}")
+        print("")
+        print("Disk I/O:")
+        print(f"  Read: {format_bytes(summary.get('disk', {}).get('read_bytes', 0))}")
+        print(f"  Write: {format_bytes(summary.get('disk', {}).get('write_bytes', 0))}")
+        print("")
+        print(f"Snapshots: {summary.get('snapshot_count', 0)}")
+        print(f"Stages: {summary.get('stage_count', 0)}")
+    
+    return 0
+
+
+def cmd_find_logs(args) -> int:
+    """Find all logs for a session."""
+    storage = get_storage()
+    
+    logs = storage.find_all_session_logs(args.session_id)
+    
+    print(f"Session Logs: {args.session_id}")
+    print("=" * 60)
+    print("")
+    
+    # Trace data
+    print(f"Trace Data: {'✓ Available' if logs['has_trace_data'] else '✗ Not found'}")
+    if logs['has_trace_data'] and logs['trace_summary']:
+        ts = logs['trace_summary']
+        from claude_trace.utils import format_duration
+        print(f"  Start Time: {ts.get('start_time', 'N/A')}")
+        print(f"  Duration: {format_duration(ts.get('duration_ms'))}")
+        print(f"  Turns: {ts.get('turn_count', 0)}")
+        print(f"  Tools: {ts.get('tool_count', 0)}")
+    print("")
+    
+    # OTEL data
+    print(f"OTEL Metrics: {'✓ Available' if logs['has_otel_data'] else '✗ Not found'}")
+    if logs['has_otel_data'] and logs['otel_summary']:
+        otel = logs['otel_summary']
+        print(f"  Input Tokens: {otel.get('input_tokens', 0):,}")
+        print(f"  Output Tokens: {otel.get('output_tokens', 0):,}")
+        print(f"  API Calls: {otel.get('api_calls', 0)}")
+        print(f"  Errors: {otel.get('errors', 0)}")
+    print("")
+    
+    # Resource data
+    print(f"Resource Data: {'✓ Available' if logs['has_resource_data'] else '✗ Not found'}")
+    if logs['has_resource_data'] and logs['resource_summary']:
+        from claude_trace.utils import format_bytes
+        rs = logs['resource_summary']
+        print(f"  Avg CPU: {rs.get('cpu', {}).get('avg_percent', 0):.1f}%")
+        print(f"  Max Memory: {rs.get('memory', {}).get('max_percent', 0):.1f}%")
+        print(f"  Network: ↓{format_bytes(rs.get('network', {}).get('bytes_recv', 0))} / "
+              f"↑{format_bytes(rs.get('network', {}).get('bytes_sent', 0))}")
+        print(f"  Snapshots: {rs.get('snapshot_count', 0)}")
+    print("")
+    
+    # Stage data
+    if logs['stages']:
+        print(f"Stage Resource Data: {len(logs['stages'])} stages")
+        for stage in logs['stages'][:10]:
+            from claude_trace.utils import format_duration
+            name = stage.get('stage_name', 'unknown')
+            duration = format_duration(stage.get('duration_ms'))
+            cpu = f"{stage.get('avg_cpu_percent', 0):.1f}%"
+            print(f"  - {name}: {duration} (CPU: {cpu})")
+        if len(logs['stages']) > 10:
+            print(f"  ... and {len(logs['stages']) - 10} more stages")
+    
+    return 0
+
+
+def cmd_report(args) -> int:
+    """Generate a unified timeline report."""
+    storage = get_storage()
+    session = storage.get_session(args.session_id)
+    
+    if not session:
+        print(f"Session not found: {args.session_id}", file=sys.stderr)
+        return 1
+    
+    # Get all available data
+    resource_data = None
+    otel_data = None
+    
+    if storage.has_resource_data(args.session_id):
+        resource_data = {
+            "resource_summary": storage.get_session_resource_summary(args.session_id),
+            "stages": storage.get_stage_resource_usage(args.session_id),
+        }
+    
+    if storage.has_otel_metrics(args.session_id):
+        otel_data = storage.get_otel_summary(args.session_id)
+    
+    analyzer = TraceAnalyzer(storage)
+    reporter = TraceReporter(analyzer)
+    
+    if args.format == "html":
+        output = reporter.generate_unified_html_report(session, resource_data, otel_data)
+    else:
+        output = reporter.generate_unified_timeline_report(session, resource_data, otel_data)
+    
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(output)
+        print(f"Report saved to: {args.output}")
+    else:
+        print(output)
+    
+    return 0
+
+
+def cmd_resource_start(args) -> int:
+    """Start background resource monitoring for Claude process."""
+    from claude_trace.resource_monitor import ClaudeProcessMonitor
+    
+    # Check if already monitoring
+    pid_file = os.path.expanduser(f"~/.claude-trace/.resource_monitor_{args.session_id}.pid")
+    if os.path.exists(pid_file):
+        print(f"Resource monitoring may already be running for session: {args.session_id}")
+        print(f"Use 'claude-trace resource-stop {args.session_id}' to stop it first.")
+        return 1
+    
+    # Start the monitor
+    monitor = ClaudeProcessMonitor(
+        args.session_id,
+        interval=args.interval,
+        auto_save=True
+    )
+    log_file = monitor.start()
+    
+    # Save monitor info for stop command
+    import json
+    monitor_info = {
+        "session_id": args.session_id,
+        "log_file": log_file,
+        "interval": args.interval,
+        "started_at": datetime.now().isoformat(),
+    }
+    
+    with open(pid_file, 'w') as f:
+        json.dump(monitor_info, f)
+    
+    print(f"Background resource monitoring started for session: {args.session_id}")
+    print(f"Log file: {log_file}")
+    print(f"Interval: {args.interval}s")
+    print(f"\nTo stop: claude-trace resource-stop {args.session_id}")
+    
+    if args.foreground:
+        # Run in foreground (blocking)
+        print("\nMonitoring Claude process... (Ctrl+C to stop)")
+        try:
+            import time
+            while True:
+                time.sleep(1)
+                snapshots = monitor.get_snapshots()
+                if snapshots:
+                    latest = snapshots[-1]
+                    print(f"\r[{latest.timestamp.strftime('%H:%M:%S')}] "
+                          f"CPU: {latest.cpu_percent:.1f}% | "
+                          f"Memory: {latest.memory_rss / 1024 / 1024:.1f}MB | "
+                          f"Threads: {latest.num_threads}", end="", flush=True)
+        except KeyboardInterrupt:
+            print("\n\nStopping monitor...")
+            monitor.stop()
+            os.remove(pid_file)
+            summary = monitor.get_summary()
+            print(f"\nSummary:")
+            print(f"  Snapshots: {summary['snapshot_count']}")
+            print(f"  Duration: {summary.get('duration_seconds', 0):.1f}s")
+            print(f"  Avg CPU: {summary.get('cpu', {}).get('avg_percent', 0):.1f}%")
+            print(f"  Avg Memory: {summary.get('memory', {}).get('avg_bytes', 0) / 1024 / 1024:.1f}MB")
+            print(f"  Log file: {log_file}")
+    
+    return 0
+
+
+def cmd_resource_stop(args) -> int:
+    """Stop background resource monitoring."""
+    pid_file = os.path.expanduser(f"~/.claude-trace/.resource_monitor_{args.session_id}.pid")
+    
+    if not os.path.exists(pid_file):
+        print(f"No resource monitoring found for session: {args.session_id}")
+        return 1
+    
+    import json
+    with open(pid_file, 'r') as f:
+        monitor_info = json.load(f)
+    
+    log_file = monitor_info.get("log_file", "")
+    
+    # Remove the pid file to signal stop
+    os.remove(pid_file)
+    
+    print(f"Resource monitoring stopped for session: {args.session_id}")
+    print(f"Log file: {log_file}")
+    
+    # Show summary if log file exists
+    if os.path.exists(log_file):
+        from claude_trace.resource_monitor import ClaudeProcessMonitor
+        snapshots = ClaudeProcessMonitor.load_from_file(log_file)
+        
+        if snapshots:
+            cpu_values = [s.cpu_percent for s in snapshots]
+            mem_values = [s.memory_rss for s in snapshots]
+            first = snapshots[0]
+            last = snapshots[-1]
+            
+            print(f"\nSummary:")
+            print(f"  Snapshots: {len(snapshots)}")
+            print(f"  Duration: {(last.timestamp - first.timestamp).total_seconds():.1f}s")
+            print(f"  Avg CPU: {sum(cpu_values) / len(cpu_values):.1f}%")
+            print(f"  Max Memory: {max(mem_values) / 1024 / 1024:.1f}MB")
+    
+    return 0
+
+
+def cmd_resource_import(args) -> int:
+    """Import resource logs from a file."""
+    from claude_trace.resource_monitor import ClaudeProcessMonitor
+    
+    if not os.path.exists(args.file):
+        print(f"File not found: {args.file}", file=sys.stderr)
+        return 1
+    
+    # Load snapshots from file
+    snapshots = ClaudeProcessMonitor.load_from_file(args.file)
+    
+    if not snapshots:
+        print(f"No valid resource data found in: {args.file}")
+        return 1
+    
+    # Store in database
+    storage = get_storage()
+    
+    # Save each snapshot as a resource snapshot
+    for snap in snapshots:
+        from claude_trace.resource_monitor import ResourceSnapshot
+        # Convert process snapshot to resource snapshot for storage
+        resource_snap = ResourceSnapshot(
+            timestamp=snap.timestamp,
+            session_id=args.session_id,
+            cpu_percent=snap.cpu_percent,
+            memory_used_bytes=snap.memory_rss,
+            memory_percent=snap.memory_percent,
+            process_memory_rss=snap.memory_rss,
+            process_memory_vms=snap.memory_vms,
+            disk_read_bytes=snap.io_read_bytes,
+            disk_write_bytes=snap.io_write_bytes,
+        )
+        storage.save_resource_snapshot(resource_snap)
+    
+    cpu_values = [s.cpu_percent for s in snapshots]
+    mem_values = [s.memory_rss for s in snapshots]
+    first = snapshots[0]
+    last = snapshots[-1]
+    
+    print(f"Imported resource data for session: {args.session_id}")
+    print(f"  Snapshots: {len(snapshots)}")
+    print(f"  Duration: {(last.timestamp - first.timestamp).total_seconds():.1f}s")
+    print(f"  Avg CPU: {sum(cpu_values) / len(cpu_values):.1f}%")
+    print(f"  Max Memory: {max(mem_values) / 1024 / 1024:.1f}MB")
+    
+    return 0
+
+
+def cmd_resource_logs(args) -> int:
+    """List available resource log files."""
+    from claude_trace.resource_monitor import ClaudeProcessMonitor
+    
+    log_files = ClaudeProcessMonitor.list_log_files(session_id=args.session_id)
+    
+    if not log_files:
+        print("No resource log files found.")
+        print(f"\nLog directory: {ClaudeProcessMonitor.DEFAULT_LOG_DIR}")
+        return 0
+    
+    print(f"Resource Log Files ({len(log_files)} found):")
+    print("")
+    
+    from claude_trace.utils import format_bytes, format_duration
+    
+    for log_file in log_files:
+        filename = os.path.basename(log_file)
+        file_size = os.path.getsize(log_file)
+        
+        # Try to get quick stats
+        try:
+            snapshots = ClaudeProcessMonitor.load_from_file(log_file)
+            if snapshots:
+                duration = (snapshots[-1].timestamp - snapshots[0].timestamp).total_seconds()
+                print(f"  {filename}")
+                print(f"    Size: {format_bytes(file_size)} | "
+                      f"Snapshots: {len(snapshots)} | "
+                      f"Duration: {format_duration(int(duration * 1000))}")
+            else:
+                print(f"  {filename} (empty)")
+        except Exception:
+            print(f"  {filename} ({format_bytes(file_size)})")
+    
+    return 0
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -811,6 +1162,114 @@ def main():
         help="Description for new mappings"
     )
     otel_auto_parser.set_defaults(func=cmd_otel_auto)
+    
+    # resource command - show resource usage for a session
+    resource_parser = subparsers.add_parser(
+        "resource",
+        help="Show resource usage for a session"
+    )
+    resource_parser.add_argument(
+        "session_id",
+        help="Session ID to show resources for"
+    )
+    resource_parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Show detailed snapshots instead of summary"
+    )
+    resource_parser.set_defaults(func=cmd_resource)
+    
+    # find-logs command - find all logs for a session
+    find_logs_parser = subparsers.add_parser(
+        "find-logs",
+        help="Find all logs (trace, OTEL, resources) for a session"
+    )
+    find_logs_parser.add_argument(
+        "session_id",
+        help="Session ID to find logs for"
+    )
+    find_logs_parser.set_defaults(func=cmd_find_logs)
+    
+    # report command - generate unified timeline report
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Generate unified timeline report with resources and I/O"
+    )
+    report_parser.add_argument(
+        "session_id",
+        help="Session ID to generate report for"
+    )
+    report_parser.add_argument(
+        "--format", "-f",
+        choices=["text", "html"],
+        default="text",
+        help="Output format (default: text)"
+    )
+    report_parser.add_argument(
+        "--output", "-o",
+        help="Output file path"
+    )
+    report_parser.set_defaults(func=cmd_report)
+    
+    # resource-start command - start background resource monitoring
+    resource_start_parser = subparsers.add_parser(
+        "resource-start",
+        help="Start background resource monitoring for Claude process"
+    )
+    resource_start_parser.add_argument(
+        "session_id",
+        help="Session ID to associate with resource logs"
+    )
+    resource_start_parser.add_argument(
+        "--interval", "-i",
+        type=float,
+        default=1.0,
+        help="Capture interval in seconds (default: 1.0)"
+    )
+    resource_start_parser.add_argument(
+        "--foreground", "-f",
+        action="store_true",
+        help="Run in foreground (blocking) with live output"
+    )
+    resource_start_parser.set_defaults(func=cmd_resource_start)
+    
+    # resource-stop command - stop background resource monitoring
+    resource_stop_parser = subparsers.add_parser(
+        "resource-stop",
+        help="Stop background resource monitoring"
+    )
+    resource_stop_parser.add_argument(
+        "session_id",
+        help="Session ID to stop monitoring for"
+    )
+    resource_stop_parser.set_defaults(func=cmd_resource_stop)
+    
+    # resource-import command - import resource logs from file
+    resource_import_parser = subparsers.add_parser(
+        "resource-import",
+        help="Import resource logs from a file into the database"
+    )
+    resource_import_parser.add_argument(
+        "session_id",
+        help="Session ID to associate with imported data"
+    )
+    resource_import_parser.add_argument(
+        "file",
+        help="Path to resource log file (JSONL format)"
+    )
+    resource_import_parser.set_defaults(func=cmd_resource_import)
+    
+    # resource-logs command - list available resource log files
+    resource_logs_parser = subparsers.add_parser(
+        "resource-logs",
+        help="List available resource log files"
+    )
+    resource_logs_parser.add_argument(
+        "session_id",
+        nargs="?",
+        help="Optional: filter by session ID"
+    )
+    resource_logs_parser.set_defaults(func=cmd_resource_logs)
     
     args = parser.parse_args()
     

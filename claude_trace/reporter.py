@@ -770,3 +770,544 @@ class TraceReporter:
 """
         
         return html
+    
+    def generate_unified_timeline_report(
+        self,
+        session: Session,
+        resource_data: Optional[Dict[str, Any]] = None,
+        otel_data: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Generate a unified timeline report with operations, time, resources, and I/O.
+        
+        Args:
+            session: Session to report on
+            resource_data: Optional resource monitoring data from storage
+            otel_data: Optional OTEL metrics data from storage
+            
+        Returns:
+            Formatted timeline report string
+        """
+        lines = [
+            f"Unified Timeline Report: {session.session_id}",
+            "=" * 60,
+            f"Started: {session.start_time.strftime('%Y-%m-%d %H:%M:%S') if session.start_time else 'N/A'}",
+            f"Duration: {format_duration(session.duration_ms)}",
+            ""
+        ]
+        
+        # Header for timeline table
+        lines.append(f"{'Stage':<30} {'Time':>10} {'CPU':>8} {'Memory':>10} {'Net I/O':>15}")
+        lines.append("-" * 80)
+        
+        # Build stage timeline
+        for turn in session.turns:
+            turn_name = f"Turn {turn.turn_number}"
+            duration = format_duration(turn.duration_ms)
+            
+            # Get resource data for this turn if available
+            cpu_str = "N/A"
+            mem_str = "N/A"
+            net_str = "N/A"
+            
+            if resource_data and "stages" in resource_data:
+                for stage in resource_data["stages"]:
+                    if stage.get("stage_id") == turn.turn_id:
+                        cpu_str = f"{stage.get('avg_cpu_percent', 0):.1f}%"
+                        mem_bytes = stage.get("max_memory_bytes", 0)
+                        mem_str = format_bytes(mem_bytes)
+                        net_in = stage.get("network_bytes_recv_delta", 0)
+                        net_out = stage.get("network_bytes_sent_delta", 0)
+                        net_str = f"↓{format_bytes(net_in)}/↑{format_bytes(net_out)}"
+                        break
+            
+            lines.append(f"{turn_name:<30} {duration:>10} {cpu_str:>8} {mem_str:>10} {net_str:>15}")
+            
+            # Show tool operations within turn
+            for tool in turn.tool_uses:
+                tool_name = f"  └─ {tool.tool_name}"
+                tool_duration = format_duration(tool.duration_ms)
+                status = "✓" if tool.success else "✗"
+                
+                tool_cpu = "N/A"
+                tool_mem = "N/A"
+                tool_net = "N/A"
+                
+                if resource_data and "stages" in resource_data:
+                    for stage in resource_data["stages"]:
+                        if stage.get("stage_id") == tool.tool_id:
+                            tool_cpu = f"{stage.get('avg_cpu_percent', 0):.1f}%"
+                            tool_mem = format_bytes(stage.get("max_memory_bytes", 0))
+                            tool_net_in = stage.get("network_bytes_recv_delta", 0)
+                            tool_net_out = stage.get("network_bytes_sent_delta", 0)
+                            tool_net = f"↓{format_bytes(tool_net_in)}/↑{format_bytes(tool_net_out)}"
+                            break
+                
+                lines.append(f"{tool_name:<30} {tool_duration:>10} {tool_cpu:>8} {tool_mem:>10} {tool_net:>15} {status}")
+        
+        lines.append("")
+        lines.append("=" * 60)
+        
+        # Summary section
+        stats = self.analyzer.analyze_session(session)
+        
+        lines.extend([
+            "Summary:",
+            f"  Total Turns: {stats.total_turns}",
+            f"  Total Tool Uses: {stats.total_tool_uses}",
+            f"  Total Tokens: {format_tokens(stats.total_tokens.total_tokens)}",
+            f"  Cache Hit Rate: {format_percentage(stats.cache_hit_rate)}",
+        ])
+        
+        # Add resource summary if available
+        if resource_data:
+            summary = resource_data.get("resource_summary") or resource_data
+            if summary:
+                lines.extend([
+                    "",
+                    "Resource Summary:",
+                    f"  Avg CPU: {summary.get('cpu', {}).get('avg_percent', 0):.1f}%",
+                    f"  Max CPU: {summary.get('cpu', {}).get('max_percent', 0):.1f}%",
+                    f"  Avg Memory: {summary.get('memory', {}).get('avg_percent', 0):.1f}%",
+                    f"  Network: ↓{format_bytes(summary.get('network', {}).get('bytes_recv', 0))} / "
+                    f"↑{format_bytes(summary.get('network', {}).get('bytes_sent', 0))}",
+                    f"  Disk: R{format_bytes(summary.get('disk', {}).get('read_bytes', 0))} / "
+                    f"W{format_bytes(summary.get('disk', {}).get('write_bytes', 0))}",
+                ])
+        
+        # Add OTEL summary if available
+        if otel_data:
+            lines.extend([
+                "",
+                "OTEL Metrics:",
+                f"  API Calls: {otel_data.get('api_calls', 0)}",
+                f"  Avg API Latency: {format_duration(int(otel_data.get('api_latency_ms', 0)))}",
+                f"  Errors: {otel_data.get('errors', 0)}",
+            ])
+        
+        return "\n".join(lines)
+    
+    def generate_unified_html_report(
+        self,
+        session: Session,
+        resource_data: Optional[Dict[str, Any]] = None,
+        otel_data: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Generate a unified HTML report with timeline, resources, and expandable details.
+        
+        Args:
+            session: Session to report on
+            resource_data: Optional resource monitoring data from storage
+            otel_data: Optional OTEL metrics data from storage
+            
+        Returns:
+            HTML string
+        """
+        stats = self.analyzer.analyze_session(session)
+        time_breakdown = self.analyzer.get_time_breakdown(session)
+        
+        # Build stage data for timeline
+        stages_json = []
+        for turn in session.turns:
+            stage_data = {
+                "id": turn.turn_id,
+                "name": f"Turn {turn.turn_number}",
+                "type": "turn",
+                "start": turn.start_time.isoformat() if turn.start_time else None,
+                "end": turn.end_time.isoformat() if turn.end_time else None,
+                "duration_ms": turn.duration_ms,
+                "input_summary": truncate_string(
+                    turn.user_message.text_content if turn.user_message else "",
+                    100
+                ),
+                "output_summary": truncate_string(
+                    turn.assistant_messages[-1].text_content if turn.assistant_messages else "",
+                    100
+                ),
+                "tokens": {
+                    "input": sum(m.usage.input_tokens for m in turn.assistant_messages if m.usage),
+                    "output": sum(m.usage.output_tokens for m in turn.assistant_messages if m.usage),
+                },
+                "resources": {},
+                "tools": []
+            }
+            
+            # Add resource data if available
+            if resource_data and "stages" in resource_data:
+                for stage in resource_data["stages"]:
+                    if stage.get("stage_id") == turn.turn_id:
+                        stage_data["resources"] = {
+                            "cpu_avg": stage.get("avg_cpu_percent", 0),
+                            "cpu_max": stage.get("max_cpu_percent", 0),
+                            "memory_max": stage.get("max_memory_bytes", 0),
+                            "memory_delta": stage.get("memory_delta_bytes", 0),
+                            "net_recv": stage.get("network_bytes_recv_delta", 0),
+                            "net_sent": stage.get("network_bytes_sent_delta", 0),
+                        }
+                        break
+            
+            # Add tool data
+            for tool in turn.tool_uses:
+                tool_data = {
+                    "id": tool.tool_id,
+                    "name": tool.tool_name,
+                    "duration_ms": tool.duration_ms,
+                    "success": tool.success,
+                    "input_summary": truncate_string(json.dumps(tool.input_data), 100),
+                    "output_summary": truncate_string(tool.output_data or "", 100),
+                    "resources": {},
+                }
+                
+                # Add tool resource data if available
+                if resource_data and "stages" in resource_data:
+                    for stage in resource_data["stages"]:
+                        if stage.get("stage_id") == tool.tool_id:
+                            tool_data["resources"] = {
+                                "cpu_avg": stage.get("avg_cpu_percent", 0),
+                                "memory_max": stage.get("max_memory_bytes", 0),
+                                "net_recv": stage.get("network_bytes_recv_delta", 0),
+                                "net_sent": stage.get("network_bytes_sent_delta", 0),
+                            }
+                            break
+                
+                stage_data["tools"].append(tool_data)
+            
+            stages_json.append(stage_data)
+        
+        stages_json_str = json.dumps(stages_json, indent=2)
+        
+        # Resource summary
+        resource_summary = {}
+        if resource_data:
+            rs = resource_data.get("resource_summary") or resource_data
+            resource_summary = {
+                "cpu_avg": rs.get("cpu", {}).get("avg_percent", 0),
+                "cpu_max": rs.get("cpu", {}).get("max_percent", 0),
+                "memory_avg": rs.get("memory", {}).get("avg_percent", 0),
+                "memory_max": rs.get("memory", {}).get("max_percent", 0),
+                "net_recv": rs.get("network", {}).get("bytes_recv", 0),
+                "net_sent": rs.get("network", {}).get("bytes_sent", 0),
+                "disk_read": rs.get("disk", {}).get("read_bytes", 0),
+                "disk_write": rs.get("disk", {}).get("write_bytes", 0),
+            }
+        
+        resource_summary_str = json.dumps(resource_summary, indent=2)
+        
+        # OTEL summary
+        otel_summary_str = json.dumps(otel_data or {}, indent=2)
+        
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Unified Timeline Report - {session.session_id}</title>
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }}
+        .card {{
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        h1, h2, h3 {{ color: #333; margin-top: 0; }}
+        .stat-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }}
+        .stat-box {{
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            text-align: center;
+        }}
+        .stat-value {{
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #2563eb;
+        }}
+        .stat-label {{
+            color: #666;
+            font-size: 0.9em;
+        }}
+        .timeline {{
+            position: relative;
+            padding-left: 30px;
+        }}
+        .timeline::before {{
+            content: '';
+            position: absolute;
+            left: 10px;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: #2563eb;
+        }}
+        .stage {{
+            position: relative;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+        }}
+        .stage::before {{
+            content: '';
+            position: absolute;
+            left: -24px;
+            top: 20px;
+            width: 10px;
+            height: 10px;
+            background: #2563eb;
+            border-radius: 50%;
+        }}
+        .stage-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+        }}
+        .stage-title {{
+            font-weight: bold;
+            font-size: 1.1em;
+        }}
+        .stage-time {{
+            color: #666;
+            font-size: 0.9em;
+        }}
+        .stage-resources {{
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #e5e7eb;
+        }}
+        .resource-item {{
+            text-align: center;
+            padding: 8px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }}
+        .resource-value {{ font-weight: bold; color: #2563eb; }}
+        .resource-label {{ font-size: 0.8em; color: #666; }}
+        .stage-details {{
+            display: none;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #e5e7eb;
+        }}
+        .stage.expanded .stage-details {{
+            display: block;
+        }}
+        .io-section {{
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }}
+        .io-title {{
+            font-weight: bold;
+            margin-bottom: 5px;
+        }}
+        .io-content {{
+            font-family: monospace;
+            font-size: 0.9em;
+            white-space: pre-wrap;
+            max-height: 150px;
+            overflow-y: auto;
+        }}
+        .tool-item {{
+            margin: 10px 0;
+            padding: 10px;
+            background: #fff3e0;
+            border-radius: 4px;
+            border-left: 3px solid #ff9800;
+        }}
+        .tool-header {{ display: flex; justify-content: space-between; align-items: center; }}
+        .tool-name {{ font-weight: bold; }}
+        .success {{ color: #2e7d32; }}
+        .error {{ color: #c62828; }}
+        .toggle-btn {{
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 1.2em;
+        }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th, td {{ text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }}
+        th {{ background: #f5f5f5; }}
+    </style>
+</head>
+<body>
+    <h1>Unified Timeline Report</h1>
+    <p>Session: <code>{session.session_id}</code></p>
+    <p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+    
+    <div class="card">
+        <h2>Overview</h2>
+        <div class="stat-grid">
+            <div class="stat-box">
+                <div class="stat-value">{format_duration(session.duration_ms)}</div>
+                <div class="stat-label">Duration</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{stats.total_turns}</div>
+                <div class="stat-label">Turns</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{stats.total_tool_uses}</div>
+                <div class="stat-label">Tool Uses</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{format_tokens(stats.total_tokens.total_tokens)}</div>
+                <div class="stat-label">Tokens</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{format_percentage(stats.cache_hit_rate)}</div>
+                <div class="stat-label">Cache Hit</div>
+            </div>
+"""
+        
+        # Add resource stats if available
+        if resource_summary:
+            html += f"""            <div class="stat-box">
+                <div class="stat-value">{resource_summary.get('cpu_avg', 0):.1f}%</div>
+                <div class="stat-label">Avg CPU</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{resource_summary.get('memory_avg', 0):.1f}%</div>
+                <div class="stat-label">Avg Memory</div>
+            </div>
+"""
+        
+        html += """        </div>
+    </div>
+    
+    <div class="card">
+        <h2>Timeline</h2>
+        <p><em>Click on a stage to expand details. Shows operation, time, resources, and I/O for each stage.</em></p>
+        <div class="timeline" id="timeline">
+"""
+        
+        # Generate timeline stages
+        for i, turn in enumerate(session.turns):
+            duration = format_duration(turn.duration_ms) if turn.duration_ms else "N/A"
+            start_time = turn.start_time.strftime('%H:%M:%S') if turn.start_time else "N/A"
+            
+            # Get resources for this turn
+            cpu_avg = "N/A"
+            mem_max = "N/A"
+            net_info = "N/A"
+            
+            if resource_data and "stages" in resource_data:
+                for stage in resource_data["stages"]:
+                    if stage.get("stage_id") == turn.turn_id:
+                        cpu_avg = f"{stage.get('avg_cpu_percent', 0):.1f}%"
+                        mem_max = format_bytes(stage.get("max_memory_bytes", 0))
+                        net_recv = stage.get("network_bytes_recv_delta", 0)
+                        net_sent = stage.get("network_bytes_sent_delta", 0)
+                        net_info = f"↓{format_bytes(net_recv)} ↑{format_bytes(net_sent)}"
+                        break
+            
+            user_content = truncate_string(
+                turn.user_message.text_content.replace('\n', ' ') if turn.user_message else "",
+                200
+            )
+            assistant_content = truncate_string(
+                turn.assistant_messages[-1].text_content.replace('\n', ' ') if turn.assistant_messages else "",
+                200
+            )
+            
+            html += f"""            <div class="stage" onclick="toggleStage(this)">
+                <div class="stage-header">
+                    <span class="stage-title">Turn {turn.turn_number}</span>
+                    <span class="stage-time">{start_time} • {duration}</span>
+                    <button class="toggle-btn">▼</button>
+                </div>
+                <div class="stage-resources">
+                    <div class="resource-item">
+                        <div class="resource-value">{cpu_avg}</div>
+                        <div class="resource-label">CPU</div>
+                    </div>
+                    <div class="resource-item">
+                        <div class="resource-value">{mem_max}</div>
+                        <div class="resource-label">Memory</div>
+                    </div>
+                    <div class="resource-item">
+                        <div class="resource-value">{net_info}</div>
+                        <div class="resource-label">Network</div>
+                    </div>
+                    <div class="resource-item">
+                        <div class="resource-value">{len(turn.tool_uses)}</div>
+                        <div class="resource-label">Tools</div>
+                    </div>
+                </div>
+                <div class="stage-details">
+                    <div class="io-section">
+                        <div class="io-title">Input (User Message)</div>
+                        <div class="io-content">{user_content}</div>
+                    </div>
+                    <div class="io-section">
+                        <div class="io-title">Output (Assistant Response)</div>
+                        <div class="io-content">{assistant_content}</div>
+                    </div>
+"""
+            
+            # Add tools
+            if turn.tool_uses:
+                html += """                    <h4>Tool Executions</h4>
+"""
+                for tool in turn.tool_uses:
+                    status = "success" if tool.success else "error"
+                    status_icon = "✓" if tool.success else "✗"
+                    tool_duration = format_duration(tool.duration_ms)
+                    tool_input = truncate_string(json.dumps(tool.input_data), 150)
+                    tool_output = truncate_string(tool.output_data or "", 150)
+                    
+                    html += f"""                    <div class="tool-item">
+                        <div class="tool-header">
+                            <span class="tool-name">{tool.tool_name}</span>
+                            <span class="{status}">{status_icon} {tool_duration}</span>
+                        </div>
+                        <div class="io-section">
+                            <div class="io-title">Input</div>
+                            <div class="io-content">{tool_input}</div>
+                        </div>
+                        <div class="io-section">
+                            <div class="io-title">Output</div>
+                            <div class="io-content">{tool_output}</div>
+                        </div>
+                    </div>
+"""
+            
+            html += """                </div>
+            </div>
+"""
+        
+        html += """        </div>
+    </div>
+    
+    <script>
+        function toggleStage(element) {
+            element.classList.toggle('expanded');
+            const btn = element.querySelector('.toggle-btn');
+            btn.textContent = element.classList.contains('expanded') ? '▲' : '▼';
+        }
+    </script>
+</body>
+</html>
+"""
+        
+        return html

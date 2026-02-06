@@ -132,4 +132,27 @@ if [ -f "$SESSION_OTEL_FILE" ] && [ -s "$SESSION_OTEL_FILE" ]; then
     log "INFO" "Session OTEL metrics captured for session $SESSION_ID"
 fi
 
+# Import resource logs if available
+RESOURCE_LOG_DIR="${CLAUDE_TRACE_RESOURCE_DIR:-$HOME/.claude-trace/resource-logs}"
+if [ -d "$RESOURCE_LOG_DIR" ]; then
+    # Find the most recent resource log for this session
+    RESOURCE_LOG=$(ls -t "$RESOURCE_LOG_DIR/${SESSION_ID}"*_resource.jsonl 2>/dev/null | head -1)
+    
+    if [ -n "$RESOURCE_LOG" ] && [ -f "$RESOURCE_LOG" ] && [ -s "$RESOURCE_LOG" ]; then
+        log "INFO" "Found resource log file, importing for session $SESSION_ID"
+        
+        if command -v claude-trace &> /dev/null; then
+            claude-trace resource-import "$SESSION_ID" "$RESOURCE_LOG" >> "$LOG_FILE" 2>&1 || {
+                log "WARN" "Failed to import resource logs"
+            }
+        elif [ -f "$SCRIPT_DIR/claude_trace/cli.py" ]; then
+            python3 -m claude_trace.cli resource-import "$SESSION_ID" "$RESOURCE_LOG" >> "$LOG_FILE" 2>&1 || {
+                log "WARN" "Failed to import resource logs with Python"
+            }
+        fi
+        
+        log "INFO" "Resource logs imported for session $SESSION_ID"
+    fi
+fi
+
 exit 0

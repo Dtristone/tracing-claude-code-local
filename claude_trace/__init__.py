@@ -7,6 +7,8 @@ without requiring any remote server connections.
 Supports:
 - Transcript-based tracing from JSONL files
 - OTEL metrics capture for token usage when OTEL_METRICS_EXPORTER=console
+- Local resource monitoring (CPU, memory, network, disk I/O)
+- Background process monitoring for Claude CLI
 """
 
 __version__ = "0.1.0"
@@ -32,6 +34,15 @@ from claude_trace.otel_collector import (
     OtelMetric,
     OtelMetricDataPoint,
 )
+from claude_trace.resource_monitor import (
+    ResourceMonitor,
+    ResourceSnapshot,
+    StageResourceUsage,
+    ClaudeProcessMonitor,
+    ProcessResourceSnapshot,
+    get_resource_monitor_availability,
+    align_resource_with_trace,
+)
 
 __all__ = [
     # Models
@@ -53,4 +64,12 @@ __all__ = [
     "OtelSessionMetrics",
     "OtelMetric",
     "OtelMetricDataPoint",
+    # Resource monitoring
+    "ResourceMonitor",
+    "ResourceSnapshot",
+    "StageResourceUsage",
+    "ClaudeProcessMonitor",
+    "ProcessResourceSnapshot",
+    "get_resource_monitor_availability",
+    "align_resource_with_trace",
 ]
