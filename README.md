@@ -13,11 +13,14 @@ A **100% local** tracing and observability solution for [Claude Code CLI](https:
 - 📁 **Export Options**: JSON and HTML reports for sharing and archival
 - 🔄 **Live Watch Mode**: Monitor active sessions in real-time
 - 🔗 **Session-OTEL Mapping**: Automatic and manual mapping between sessions and OTEL log files
+- 💻 **Resource Monitoring**: Track CPU, memory, network, and disk I/O for each stage
+- 📋 **Unified Reports**: Generate timeline reports with resources, operations, and I/O aligned by time
 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
 - [Automatic OTEL Metrics Integration](#automatic-otel-metrics-integration)
+- [Resource Monitoring](#resource-monitoring)
 - [CLI Command Reference](#cli-command-reference)
 - [OTEL Commands](#otel-commands)
 - [Output Examples](#output-examples)
@@ -198,6 +201,93 @@ The mapping file is stored at `~/.claude-trace/otel-session-mapping.json`:
 }
 ```
 
+## Resource Monitoring
+
+The resource monitoring feature tracks local system resources (CPU, memory, network, disk I/O) during session execution, allowing you to correlate resource usage with each stage of your Claude Code sessions.
+
+### Captured Metrics
+
+- **CPU**: Usage percentage, user/system breakdown
+- **Memory**: Used/available bytes, percentage, process memory (RSS/VMS)
+- **Network**: Bytes sent/received, packets sent/received
+- **Disk I/O**: Read/write bytes
+
+### Using Resource Monitoring Programmatically
+
+```python
+from claude_trace import ResourceMonitor, ResourceSnapshot
+
+# Create a monitor for a session
+monitor = ResourceMonitor("my-session-id")
+
+# Start tracking a stage (e.g., model inference)
+monitor.start_stage("stage-1", "model_inference")
+
+# Capture snapshots during the stage
+snapshot = monitor.capture_snapshot()
+print(f"CPU: {snapshot.cpu_percent:.1f}%")
+print(f"Memory: {snapshot.memory_percent:.1f}%")
+
+# End the stage
+stage = monitor.end_stage("stage-1")
+print(f"Stage duration: {stage.duration_ms}ms")
+print(f"Avg CPU: {stage.avg_cpu_percent:.1f}%")
+
+# Get session summary
+summary = monitor.get_session_summary()
+```
+
+### CLI Commands for Resource Data
+
+```bash
+# View resource usage for a session
+claude-trace resource <session_id>
+
+# View detailed snapshots
+claude-trace resource <session_id> --verbose
+
+# Find all logs for a session (trace, OTEL, resources)
+claude-trace find-logs <session_id>
+
+# Generate unified timeline report with resources
+claude-trace report <session_id>
+
+# Generate HTML report with interactive timeline
+claude-trace report <session_id> --format html --output report.html
+```
+
+### Unified Timeline Report
+
+The unified report combines trace data, OTEL metrics, and resource usage in a single timeline view:
+
+```
+Unified Timeline Report: abc-123-def
+============================================================
+Started: 2025-02-04 10:30:00
+Duration: 45.3s
+
+Stage                          Time       CPU      Memory         Net I/O
+--------------------------------------------------------------------------------
+Turn 1                         15.2s     8.5%      256MB     ↓1.2KB/↑0.5KB
+  └─ Read                       0.1s     2.1%      256MB     ↓0.1KB/↑0.0KB
+  └─ Bash                       8.0s    15.2%      280MB     ↓0.8KB/↑0.3KB ✓
+Turn 2                         30.1s    12.3%      285MB     ↓2.5KB/↑1.2KB
+
+============================================================
+Summary:
+  Total Turns: 2
+  Total Tool Uses: 2
+  Total Tokens: 1,630
+  Cache Hit Rate: 42.0%
+
+Resource Summary:
+  Avg CPU: 10.4%
+  Max CPU: 15.2%
+  Avg Memory: 8.5%
+  Network: ↓3.7KB / ↑1.7KB
+  Disk: R0B / W0B
+```
+
 ## CLI Command Reference
 
 ### Session Management
@@ -283,6 +373,33 @@ claude-trace watch --interval 2.0
 
 # Specify session ID
 claude-trace watch --session-id my-session
+```
+
+### Resource Commands
+
+```bash
+# View resource usage for a session
+claude-trace resource <session_id>
+
+# View detailed resource snapshots
+claude-trace resource <session_id> --verbose
+```
+
+### Log Discovery
+
+```bash
+# Find all logs for a session (trace, OTEL, resources)
+claude-trace find-logs <session_id>
+```
+
+### Unified Reports
+
+```bash
+# Generate unified timeline report (text format)
+claude-trace report <session_id>
+
+# Generate HTML report with interactive timeline
+claude-trace report <session_id> --format html --output report.html
 ```
 
 ### Export Commands
@@ -457,6 +574,8 @@ The SQLite database includes these tables:
 - **`tool_uses`**: Tool invocations with inputs, outputs, and timing
 - **`otel_metrics`**: OpenTelemetry metrics data points
 - **`otel_session_summary`**: Aggregated OTEL metrics per session
+- **`resource_snapshots`**: Point-in-time resource usage measurements (CPU, memory, network, disk)
+- **`stage_resource_usage`**: Aggregated resource usage per stage/operation
 
 ## Environment Variables
 
@@ -540,7 +659,7 @@ export OTEL_METRICS_OUTPUT=~/.claude-trace/otel-output.txt
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
 │  │  Commands: list, show, timeline, tools, stats, export, watch,         │  │
 │  │            analyze, delete, otel, otel-import, otel-capture,          │  │
-│  │            otel-mapping, otel-auto                                    │  │
+│  │            otel-mapping, otel-auto, resource, find-logs, report       │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -553,6 +672,7 @@ export OTEL_METRICS_OUTPUT=~/.claude-trace/otel-output.txt
 | Privacy | ✅ All data local | ⚠️ Data sent to cloud |
 | Cost | ✅ Free | 💰 Pricing tiers |
 | OTEL Integration | ✅ Automatic | ⚠️ Requires setup |
+| Resource Monitoring | ✅ Built-in | ❌ Not available |
 | Team Collaboration | ❌ Local only | ✅ Team sharing |
 | Real-time Dashboards | ❌ No | ✅ Yes |
 | Data Retention | ✅ You control | ⚠️ Based on plan |
@@ -569,6 +689,7 @@ tracing-claude-code-local/
 │   ├── models.py              # Data models (Session, Turn, Message, etc.)
 │   ├── collector.py           # JSONL transcript parsing
 │   ├── otel_collector.py      # OTEL metrics parsing and mapping
+│   ├── resource_monitor.py    # Local resource monitoring (CPU, memory, network, disk)
 │   ├── analyzer.py            # Statistics computation and OTEL enrichment
 │   ├── storage.py             # SQLite persistence layer
 │   ├── reporter.py            # Output formatting (terminal, JSON, HTML)

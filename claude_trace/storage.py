@@ -155,6 +155,58 @@ class TraceStorage:
                 )
             """)
             
+            # Resource snapshots table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS resource_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    stage_id TEXT,
+                    stage_name TEXT,
+                    timestamp TEXT NOT NULL,
+                    cpu_percent REAL DEFAULT 0,
+                    cpu_user_percent REAL DEFAULT 0,
+                    cpu_system_percent REAL DEFAULT 0,
+                    memory_used_bytes INTEGER DEFAULT 0,
+                    memory_available_bytes INTEGER DEFAULT 0,
+                    memory_total_bytes INTEGER DEFAULT 0,
+                    memory_percent REAL DEFAULT 0,
+                    process_memory_rss INTEGER DEFAULT 0,
+                    process_memory_vms INTEGER DEFAULT 0,
+                    network_bytes_sent INTEGER DEFAULT 0,
+                    network_bytes_recv INTEGER DEFAULT 0,
+                    network_packets_sent INTEGER DEFAULT 0,
+                    network_packets_recv INTEGER DEFAULT 0,
+                    disk_read_bytes INTEGER DEFAULT 0,
+                    disk_write_bytes INTEGER DEFAULT 0,
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                )
+            """)
+            
+            # Stage resource usage table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS stage_resource_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    stage_id TEXT NOT NULL,
+                    stage_name TEXT NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT,
+                    duration_ms INTEGER,
+                    avg_cpu_percent REAL DEFAULT 0,
+                    max_cpu_percent REAL DEFAULT 0,
+                    avg_memory_percent REAL DEFAULT 0,
+                    max_memory_bytes INTEGER DEFAULT 0,
+                    memory_delta_bytes INTEGER DEFAULT 0,
+                    network_bytes_sent_delta INTEGER DEFAULT 0,
+                    network_bytes_recv_delta INTEGER DEFAULT 0,
+                    disk_read_bytes_delta INTEGER DEFAULT 0,
+                    disk_write_bytes_delta INTEGER DEFAULT 0,
+                    snapshot_count INTEGER DEFAULT 0,
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id),
+                    UNIQUE(session_id, stage_id)
+                )
+            """)
+            
             # Create indexes
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_turns_session 
@@ -183,6 +235,18 @@ class TraceStorage:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_otel_metrics_name 
                 ON otel_metrics(metric_name)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_resource_snapshots_session 
+                ON resource_snapshots(session_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_resource_snapshots_stage 
+                ON resource_snapshots(stage_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_stage_resource_usage_session 
+                ON stage_resource_usage(session_id)
             """)
             
             conn.commit()
@@ -835,3 +899,368 @@ class TraceStorage:
             return cursor.fetchone() is not None
         finally:
             conn.close()
+    
+    # ============ Resource Monitoring Methods ============
+    
+    def save_resource_snapshot(self, snapshot) -> None:
+        """
+        Save a resource snapshot to the database.
+        
+        Args:
+            snapshot: ResourceSnapshot object
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                INSERT INTO resource_snapshots
+                (session_id, stage_id, stage_name, timestamp,
+                 cpu_percent, cpu_user_percent, cpu_system_percent,
+                 memory_used_bytes, memory_available_bytes, memory_total_bytes,
+                 memory_percent, process_memory_rss, process_memory_vms,
+                 network_bytes_sent, network_bytes_recv,
+                 network_packets_sent, network_packets_recv,
+                 disk_read_bytes, disk_write_bytes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                snapshot.session_id,
+                snapshot.stage_id,
+                snapshot.stage_name,
+                snapshot.timestamp.isoformat(),
+                snapshot.cpu_percent,
+                snapshot.cpu_user_percent,
+                snapshot.cpu_system_percent,
+                snapshot.memory_used_bytes,
+                snapshot.memory_available_bytes,
+                snapshot.memory_total_bytes,
+                snapshot.memory_percent,
+                snapshot.process_memory_rss,
+                snapshot.process_memory_vms,
+                snapshot.network_bytes_sent,
+                snapshot.network_bytes_recv,
+                snapshot.network_packets_sent,
+                snapshot.network_packets_recv,
+                snapshot.disk_read_bytes,
+                snapshot.disk_write_bytes
+            ))
+            
+            conn.commit()
+        finally:
+            conn.close()
+    
+    def save_stage_resource_usage(self, stage) -> None:
+        """
+        Save stage resource usage summary to the database.
+        
+        Args:
+            stage: StageResourceUsage object
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                INSERT OR REPLACE INTO stage_resource_usage
+                (session_id, stage_id, stage_name, start_time, end_time,
+                 duration_ms, avg_cpu_percent, max_cpu_percent,
+                 avg_memory_percent, max_memory_bytes, memory_delta_bytes,
+                 network_bytes_sent_delta, network_bytes_recv_delta,
+                 disk_read_bytes_delta, disk_write_bytes_delta, snapshot_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                stage.session_id,
+                stage.stage_id,
+                stage.stage_name,
+                stage.start_time.isoformat(),
+                stage.end_time.isoformat() if stage.end_time else None,
+                stage.duration_ms,
+                stage.avg_cpu_percent,
+                stage.max_cpu_percent,
+                stage.avg_memory_percent,
+                stage.max_memory_bytes,
+                stage.memory_delta_bytes,
+                stage.network_bytes_sent_delta,
+                stage.network_bytes_recv_delta,
+                stage.disk_read_bytes_delta,
+                stage.disk_write_bytes_delta,
+                len(stage.snapshots)
+            ))
+            
+            conn.commit()
+        finally:
+            conn.close()
+    
+    def get_resource_snapshots(
+        self,
+        session_id: str,
+        stage_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get resource snapshots for a session.
+        
+        Args:
+            session_id: Session ID
+            stage_id: Optional stage ID to filter by
+            
+        Returns:
+            List of snapshot dictionaries
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            if stage_id:
+                cursor.execute("""
+                    SELECT * FROM resource_snapshots
+                    WHERE session_id = ? AND stage_id = ?
+                    ORDER BY timestamp
+                """, (session_id, stage_id))
+            else:
+                cursor.execute("""
+                    SELECT * FROM resource_snapshots
+                    WHERE session_id = ?
+                    ORDER BY timestamp
+                """, (session_id,))
+            
+            snapshots = []
+            for row in cursor.fetchall():
+                snapshots.append({
+                    "timestamp": row["timestamp"],
+                    "session_id": row["session_id"],
+                    "stage_id": row["stage_id"],
+                    "stage_name": row["stage_name"],
+                    "cpu_percent": row["cpu_percent"],
+                    "cpu_user_percent": row["cpu_user_percent"],
+                    "cpu_system_percent": row["cpu_system_percent"],
+                    "memory_used_bytes": row["memory_used_bytes"],
+                    "memory_available_bytes": row["memory_available_bytes"],
+                    "memory_total_bytes": row["memory_total_bytes"],
+                    "memory_percent": row["memory_percent"],
+                    "process_memory_rss": row["process_memory_rss"],
+                    "process_memory_vms": row["process_memory_vms"],
+                    "network_bytes_sent": row["network_bytes_sent"],
+                    "network_bytes_recv": row["network_bytes_recv"],
+                    "network_packets_sent": row["network_packets_sent"],
+                    "network_packets_recv": row["network_packets_recv"],
+                    "disk_read_bytes": row["disk_read_bytes"],
+                    "disk_write_bytes": row["disk_write_bytes"],
+                })
+            
+            return snapshots
+        finally:
+            conn.close()
+    
+    def get_stage_resource_usage(
+        self,
+        session_id: str,
+        stage_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get stage resource usage data for a session.
+        
+        Args:
+            session_id: Session ID
+            stage_id: Optional stage ID to get specific stage
+            
+        Returns:
+            List of stage resource usage dictionaries
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            if stage_id:
+                cursor.execute("""
+                    SELECT * FROM stage_resource_usage
+                    WHERE session_id = ? AND stage_id = ?
+                    ORDER BY start_time
+                """, (session_id, stage_id))
+            else:
+                cursor.execute("""
+                    SELECT * FROM stage_resource_usage
+                    WHERE session_id = ?
+                    ORDER BY start_time
+                """, (session_id,))
+            
+            stages = []
+            for row in cursor.fetchall():
+                stages.append({
+                    "session_id": row["session_id"],
+                    "stage_id": row["stage_id"],
+                    "stage_name": row["stage_name"],
+                    "start_time": row["start_time"],
+                    "end_time": row["end_time"],
+                    "duration_ms": row["duration_ms"],
+                    "avg_cpu_percent": row["avg_cpu_percent"],
+                    "max_cpu_percent": row["max_cpu_percent"],
+                    "avg_memory_percent": row["avg_memory_percent"],
+                    "max_memory_bytes": row["max_memory_bytes"],
+                    "memory_delta_bytes": row["memory_delta_bytes"],
+                    "network_bytes_sent_delta": row["network_bytes_sent_delta"],
+                    "network_bytes_recv_delta": row["network_bytes_recv_delta"],
+                    "disk_read_bytes_delta": row["disk_read_bytes_delta"],
+                    "disk_write_bytes_delta": row["disk_write_bytes_delta"],
+                    "snapshot_count": row["snapshot_count"],
+                })
+            
+            return stages
+        finally:
+            conn.close()
+    
+    def get_session_resource_summary(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a summary of resource usage for a session.
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            Dictionary with resource summary or None if no data
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Get aggregate stats from snapshots
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as snapshot_count,
+                    MIN(timestamp) as start_time,
+                    MAX(timestamp) as end_time,
+                    AVG(cpu_percent) as avg_cpu_percent,
+                    MAX(cpu_percent) as max_cpu_percent,
+                    AVG(memory_percent) as avg_memory_percent,
+                    MAX(memory_percent) as max_memory_percent,
+                    MAX(memory_used_bytes) as max_memory_bytes
+                FROM resource_snapshots
+                WHERE session_id = ?
+            """, (session_id,))
+            
+            row = cursor.fetchone()
+            
+            if not row or row["snapshot_count"] == 0:
+                return None
+            
+            # Get first and last snapshots for delta calculations
+            cursor.execute("""
+                SELECT * FROM resource_snapshots
+                WHERE session_id = ?
+                ORDER BY timestamp ASC LIMIT 1
+            """, (session_id,))
+            first = cursor.fetchone()
+            
+            cursor.execute("""
+                SELECT * FROM resource_snapshots
+                WHERE session_id = ?
+                ORDER BY timestamp DESC LIMIT 1
+            """, (session_id,))
+            last = cursor.fetchone()
+            
+            # Get stage count
+            cursor.execute("""
+                SELECT COUNT(*) as stage_count
+                FROM stage_resource_usage
+                WHERE session_id = ?
+            """, (session_id,))
+            stage_row = cursor.fetchone()
+            
+            return {
+                "session_id": session_id,
+                "snapshot_count": row["snapshot_count"],
+                "stage_count": stage_row["stage_count"] if stage_row else 0,
+                "start_time": row["start_time"],
+                "end_time": row["end_time"],
+                "cpu": {
+                    "avg_percent": row["avg_cpu_percent"] or 0,
+                    "max_percent": row["max_cpu_percent"] or 0,
+                },
+                "memory": {
+                    "avg_percent": row["avg_memory_percent"] or 0,
+                    "max_percent": row["max_memory_percent"] or 0,
+                    "max_bytes": row["max_memory_bytes"] or 0,
+                    "delta_bytes": (last["memory_used_bytes"] - first["memory_used_bytes"]) if first and last else 0,
+                },
+                "network": {
+                    "bytes_sent": (last["network_bytes_sent"] - first["network_bytes_sent"]) if first and last else 0,
+                    "bytes_recv": (last["network_bytes_recv"] - first["network_bytes_recv"]) if first and last else 0,
+                },
+                "disk": {
+                    "read_bytes": (last["disk_read_bytes"] - first["disk_read_bytes"]) if first and last else 0,
+                    "write_bytes": (last["disk_write_bytes"] - first["disk_write_bytes"]) if first and last else 0,
+                },
+            }
+        finally:
+            conn.close()
+    
+    def has_resource_data(self, session_id: str) -> bool:
+        """
+        Check if a session has resource monitoring data.
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            True if session has resource data
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM resource_snapshots WHERE session_id = ? LIMIT 1",
+                (session_id,)
+            )
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+    
+    def find_all_session_logs(self, session_id: str) -> Dict[str, Any]:
+        """
+        Find all logs and data associated with a session.
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            Dictionary with all available log sources and their data
+        """
+        result = {
+            "session_id": session_id,
+            "has_trace_data": False,
+            "has_otel_data": False,
+            "has_resource_data": False,
+            "trace_summary": None,
+            "otel_summary": None,
+            "resource_summary": None,
+            "stages": [],
+        }
+        
+        # Check for trace data
+        session = self.get_session(session_id)
+        if session:
+            result["has_trace_data"] = True
+            result["trace_summary"] = {
+                "start_time": session.start_time.isoformat() if session.start_time else None,
+                "end_time": session.end_time.isoformat() if session.end_time else None,
+                "duration_ms": session.duration_ms,
+                "turn_count": len(session.turns),
+                "tool_count": sum(len(t.tool_uses) for t in session.turns),
+            }
+        
+        # Check for OTEL data
+        otel_summary = self.get_otel_summary(session_id)
+        if otel_summary:
+            result["has_otel_data"] = True
+            result["otel_summary"] = otel_summary
+        
+        # Check for resource data
+        resource_summary = self.get_session_resource_summary(session_id)
+        if resource_summary:
+            result["has_resource_data"] = True
+            result["resource_summary"] = resource_summary
+        
+        # Get stage-level data
+        stages = self.get_stage_resource_usage(session_id)
+        result["stages"] = stages
+        
+        return result

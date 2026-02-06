@@ -576,6 +576,166 @@ def cmd_otel_auto(args) -> int:
     return 0
 
 
+def cmd_resource(args) -> int:
+    """Show resource usage for a session."""
+    storage = get_storage()
+    
+    if not storage.has_resource_data(args.session_id):
+        print(f"No resource data found for session: {args.session_id}")
+        print("\nResource monitoring data is collected when monitoring is enabled during session.")
+        return 1
+    
+    # Get resource summary
+    summary = storage.get_session_resource_summary(args.session_id)
+    
+    if args.verbose:
+        # Show detailed snapshots
+        snapshots = storage.get_resource_snapshots(args.session_id)
+        print(f"Resource Snapshots: {args.session_id}")
+        print(f"Total Snapshots: {len(snapshots)}")
+        print("")
+        print(f"{'Timestamp':<26} {'CPU':>8} {'Memory':>8} {'Net Recv':>12} {'Net Sent':>12}")
+        print("-" * 70)
+        
+        for snap in snapshots[:50]:  # Limit to 50 for display
+            from claude_trace.utils import format_bytes
+            ts = snap.get("timestamp", "")[:19]
+            cpu = f"{snap.get('cpu_percent', 0):.1f}%"
+            mem = f"{snap.get('memory_percent', 0):.1f}%"
+            net_recv = format_bytes(snap.get("network_bytes_recv", 0))
+            net_sent = format_bytes(snap.get("network_bytes_sent", 0))
+            print(f"{ts:<26} {cpu:>8} {mem:>8} {net_recv:>12} {net_sent:>12}")
+        
+        if len(snapshots) > 50:
+            print(f"... and {len(snapshots) - 50} more snapshots")
+    else:
+        # Show summary
+        from claude_trace.utils import format_bytes, format_duration
+        
+        print(f"Resource Summary: {args.session_id}")
+        print("")
+        print("CPU Usage:")
+        print(f"  Average: {summary.get('cpu', {}).get('avg_percent', 0):.1f}%")
+        print(f"  Maximum: {summary.get('cpu', {}).get('max_percent', 0):.1f}%")
+        print("")
+        print("Memory Usage:")
+        print(f"  Average: {summary.get('memory', {}).get('avg_percent', 0):.1f}%")
+        print(f"  Maximum: {summary.get('memory', {}).get('max_percent', 0):.1f}%")
+        print(f"  Max Used: {format_bytes(summary.get('memory', {}).get('max_bytes', 0))}")
+        print(f"  Delta: {format_bytes(abs(summary.get('memory', {}).get('delta_bytes', 0)))}")
+        print("")
+        print("Network:")
+        print(f"  Received: {format_bytes(summary.get('network', {}).get('bytes_recv', 0))}")
+        print(f"  Sent: {format_bytes(summary.get('network', {}).get('bytes_sent', 0))}")
+        print("")
+        print("Disk I/O:")
+        print(f"  Read: {format_bytes(summary.get('disk', {}).get('read_bytes', 0))}")
+        print(f"  Write: {format_bytes(summary.get('disk', {}).get('write_bytes', 0))}")
+        print("")
+        print(f"Snapshots: {summary.get('snapshot_count', 0)}")
+        print(f"Stages: {summary.get('stage_count', 0)}")
+    
+    return 0
+
+
+def cmd_find_logs(args) -> int:
+    """Find all logs for a session."""
+    storage = get_storage()
+    
+    logs = storage.find_all_session_logs(args.session_id)
+    
+    print(f"Session Logs: {args.session_id}")
+    print("=" * 60)
+    print("")
+    
+    # Trace data
+    print(f"Trace Data: {'✓ Available' if logs['has_trace_data'] else '✗ Not found'}")
+    if logs['has_trace_data'] and logs['trace_summary']:
+        ts = logs['trace_summary']
+        from claude_trace.utils import format_duration
+        print(f"  Start Time: {ts.get('start_time', 'N/A')}")
+        print(f"  Duration: {format_duration(ts.get('duration_ms'))}")
+        print(f"  Turns: {ts.get('turn_count', 0)}")
+        print(f"  Tools: {ts.get('tool_count', 0)}")
+    print("")
+    
+    # OTEL data
+    print(f"OTEL Metrics: {'✓ Available' if logs['has_otel_data'] else '✗ Not found'}")
+    if logs['has_otel_data'] and logs['otel_summary']:
+        otel = logs['otel_summary']
+        print(f"  Input Tokens: {otel.get('input_tokens', 0):,}")
+        print(f"  Output Tokens: {otel.get('output_tokens', 0):,}")
+        print(f"  API Calls: {otel.get('api_calls', 0)}")
+        print(f"  Errors: {otel.get('errors', 0)}")
+    print("")
+    
+    # Resource data
+    print(f"Resource Data: {'✓ Available' if logs['has_resource_data'] else '✗ Not found'}")
+    if logs['has_resource_data'] and logs['resource_summary']:
+        from claude_trace.utils import format_bytes
+        rs = logs['resource_summary']
+        print(f"  Avg CPU: {rs.get('cpu', {}).get('avg_percent', 0):.1f}%")
+        print(f"  Max Memory: {rs.get('memory', {}).get('max_percent', 0):.1f}%")
+        print(f"  Network: ↓{format_bytes(rs.get('network', {}).get('bytes_recv', 0))} / "
+              f"↑{format_bytes(rs.get('network', {}).get('bytes_sent', 0))}")
+        print(f"  Snapshots: {rs.get('snapshot_count', 0)}")
+    print("")
+    
+    # Stage data
+    if logs['stages']:
+        print(f"Stage Resource Data: {len(logs['stages'])} stages")
+        for stage in logs['stages'][:10]:
+            from claude_trace.utils import format_duration
+            name = stage.get('stage_name', 'unknown')
+            duration = format_duration(stage.get('duration_ms'))
+            cpu = f"{stage.get('avg_cpu_percent', 0):.1f}%"
+            print(f"  - {name}: {duration} (CPU: {cpu})")
+        if len(logs['stages']) > 10:
+            print(f"  ... and {len(logs['stages']) - 10} more stages")
+    
+    return 0
+
+
+def cmd_report(args) -> int:
+    """Generate a unified timeline report."""
+    storage = get_storage()
+    session = storage.get_session(args.session_id)
+    
+    if not session:
+        print(f"Session not found: {args.session_id}", file=sys.stderr)
+        return 1
+    
+    # Get all available data
+    resource_data = None
+    otel_data = None
+    
+    if storage.has_resource_data(args.session_id):
+        resource_data = {
+            "resource_summary": storage.get_session_resource_summary(args.session_id),
+            "stages": storage.get_stage_resource_usage(args.session_id),
+        }
+    
+    if storage.has_otel_metrics(args.session_id):
+        otel_data = storage.get_otel_summary(args.session_id)
+    
+    analyzer = TraceAnalyzer(storage)
+    reporter = TraceReporter(analyzer)
+    
+    if args.format == "html":
+        output = reporter.generate_unified_html_report(session, resource_data, otel_data)
+    else:
+        output = reporter.generate_unified_timeline_report(session, resource_data, otel_data)
+    
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(output)
+        print(f"Report saved to: {args.output}")
+    else:
+        print(output)
+    
+    return 0
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -811,6 +971,54 @@ def main():
         help="Description for new mappings"
     )
     otel_auto_parser.set_defaults(func=cmd_otel_auto)
+    
+    # resource command - show resource usage for a session
+    resource_parser = subparsers.add_parser(
+        "resource",
+        help="Show resource usage for a session"
+    )
+    resource_parser.add_argument(
+        "session_id",
+        help="Session ID to show resources for"
+    )
+    resource_parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Show detailed snapshots instead of summary"
+    )
+    resource_parser.set_defaults(func=cmd_resource)
+    
+    # find-logs command - find all logs for a session
+    find_logs_parser = subparsers.add_parser(
+        "find-logs",
+        help="Find all logs (trace, OTEL, resources) for a session"
+    )
+    find_logs_parser.add_argument(
+        "session_id",
+        help="Session ID to find logs for"
+    )
+    find_logs_parser.set_defaults(func=cmd_find_logs)
+    
+    # report command - generate unified timeline report
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Generate unified timeline report with resources and I/O"
+    )
+    report_parser.add_argument(
+        "session_id",
+        help="Session ID to generate report for"
+    )
+    report_parser.add_argument(
+        "--format", "-f",
+        choices=["text", "html"],
+        default="text",
+        help="Output format (default: text)"
+    )
+    report_parser.add_argument(
+        "--output", "-o",
+        help="Output file path"
+    )
+    report_parser.set_defaults(func=cmd_report)
     
     args = parser.parse_args()
     
