@@ -589,3 +589,506 @@ def get_resource_monitor_availability() -> Dict[str, bool]:
         capabilities["disk_monitoring"] = os.path.exists("/proc/diskstats")
     
     return capabilities
+
+
+@dataclass
+class ProcessResourceSnapshot:
+    """A snapshot of resource usage for a specific process (Claude CLI)."""
+    timestamp: datetime
+    session_id: str
+    
+    # Process identification
+    pid: int = 0
+    process_name: str = ""
+    cmdline: str = ""
+    
+    # Process CPU (percentage 0-100+)
+    cpu_percent: float = 0.0
+    
+    # Process memory (bytes)
+    memory_rss: int = 0  # Resident Set Size
+    memory_vms: int = 0  # Virtual Memory Size
+    memory_percent: float = 0.0
+    
+    # Process I/O (bytes)
+    io_read_bytes: int = 0
+    io_write_bytes: int = 0
+    io_read_count: int = 0
+    io_write_count: int = 0
+    
+    # Process threads
+    num_threads: int = 0
+    
+    # System context (for alignment)
+    system_cpu_percent: float = 0.0
+    system_memory_percent: float = 0.0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for storage/serialization."""
+        return {
+            "timestamp": self.timestamp.isoformat(),
+            "session_id": self.session_id,
+            "pid": self.pid,
+            "process_name": self.process_name,
+            "cmdline": self.cmdline,
+            "cpu_percent": self.cpu_percent,
+            "memory_rss": self.memory_rss,
+            "memory_vms": self.memory_vms,
+            "memory_percent": self.memory_percent,
+            "io_read_bytes": self.io_read_bytes,
+            "io_write_bytes": self.io_write_bytes,
+            "io_read_count": self.io_read_count,
+            "io_write_count": self.io_write_count,
+            "num_threads": self.num_threads,
+            "system_cpu_percent": self.system_cpu_percent,
+            "system_memory_percent": self.system_memory_percent,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ProcessResourceSnapshot":
+        """Create from dictionary."""
+        from claude_trace.utils import parse_timestamp
+        return cls(
+            timestamp=parse_timestamp(data.get("timestamp", "")),
+            session_id=data.get("session_id", ""),
+            pid=data.get("pid", 0),
+            process_name=data.get("process_name", ""),
+            cmdline=data.get("cmdline", ""),
+            cpu_percent=data.get("cpu_percent", 0.0),
+            memory_rss=data.get("memory_rss", 0),
+            memory_vms=data.get("memory_vms", 0),
+            memory_percent=data.get("memory_percent", 0.0),
+            io_read_bytes=data.get("io_read_bytes", 0),
+            io_write_bytes=data.get("io_write_bytes", 0),
+            io_read_count=data.get("io_read_count", 0),
+            io_write_count=data.get("io_write_count", 0),
+            num_threads=data.get("num_threads", 0),
+            system_cpu_percent=data.get("system_cpu_percent", 0.0),
+            system_memory_percent=data.get("system_memory_percent", 0.0),
+        )
+    
+    def to_log_line(self) -> str:
+        """Convert to a single log line for file output."""
+        import json
+        return json.dumps(self.to_dict())
+
+
+class ClaudeProcessMonitor:
+    """
+    Background monitor for Claude CLI process resource usage.
+    
+    Runs as a daemon thread and auto-saves resource logs to file,
+    similar to how OTEL metrics are captured. Monitors only the Claude
+    process (by finding it by name), not the whole system.
+    
+    Usage:
+        monitor = ClaudeProcessMonitor("session-123")
+        monitor.start()
+        # ... Claude CLI runs ...
+        monitor.stop()  # Saves to file automatically
+    """
+    
+    DEFAULT_LOG_DIR = os.path.expanduser("~/.claude-trace/resource-logs")
+    PROCESS_NAMES = ["claude", "node"]  # Claude CLI runs as node process
+    
+    def __init__(
+        self, 
+        session_id: str,
+        log_dir: Optional[str] = None,
+        interval: float = 1.0,
+        auto_save: bool = True
+    ):
+        """
+        Initialize the Claude process monitor.
+        
+        Args:
+            session_id: Session ID to associate with resource logs
+            log_dir: Directory to save resource log files (default: ~/.claude-trace/resource-logs)
+            interval: Capture interval in seconds (default: 1.0)
+            auto_save: Automatically save to file on stop (default: True)
+        """
+        self.session_id = session_id
+        self.log_dir = log_dir or self.DEFAULT_LOG_DIR
+        self.interval = interval
+        self.auto_save = auto_save
+        
+        self._snapshots: List[ProcessResourceSnapshot] = []
+        self._monitoring = False
+        self._monitor_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._log_file: Optional[str] = None
+        self._file_handle = None
+        self._claude_pid: Optional[int] = None
+        
+        # Ensure log directory exists
+        os.makedirs(self.log_dir, exist_ok=True)
+    
+    def _find_claude_process(self) -> Optional[int]:
+        """
+        Find the Claude CLI process by name.
+        
+        Returns:
+            PID of Claude process or None if not found
+        """
+        if HAS_PSUTIL:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    info = proc.info
+                    name = info.get('name', '').lower()
+                    cmdline = ' '.join(info.get('cmdline', []) or []).lower()
+                    
+                    # Check if it's a Claude process
+                    if 'claude' in name or 'claude' in cmdline:
+                        return info['pid']
+                    
+                    # Check for node process running Claude
+                    if name == 'node' and 'claude' in cmdline:
+                        return info['pid']
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        else:
+            # Fallback to /proc on Linux
+            if os.path.exists("/proc"):
+                for pid_dir in os.listdir("/proc"):
+                    if not pid_dir.isdigit():
+                        continue
+                    try:
+                        cmdline_file = f"/proc/{pid_dir}/cmdline"
+                        if os.path.exists(cmdline_file):
+                            with open(cmdline_file, 'r') as f:
+                                cmdline = f.read().replace('\0', ' ').lower()
+                            if 'claude' in cmdline:
+                                return int(pid_dir)
+                    except (PermissionError, FileNotFoundError, ValueError):
+                        continue
+        
+        return None
+    
+    def _capture_process_snapshot(self) -> Optional[ProcessResourceSnapshot]:
+        """
+        Capture resource usage for the Claude process.
+        
+        Returns:
+            ProcessResourceSnapshot or None if process not found
+        """
+        # Find Claude process if we don't have a PID yet
+        if self._claude_pid is None:
+            self._claude_pid = self._find_claude_process()
+        
+        if self._claude_pid is None:
+            return None
+        
+        snapshot = ProcessResourceSnapshot(
+            timestamp=datetime.now(),
+            session_id=self.session_id,
+            pid=self._claude_pid
+        )
+        
+        if HAS_PSUTIL:
+            try:
+                proc = psutil.Process(self._claude_pid)
+                
+                # Process info
+                snapshot.process_name = proc.name()
+                try:
+                    # Limit cmdline length to avoid excessive storage/memory usage
+                    cmdline = ' '.join(proc.cmdline())
+                    snapshot.cmdline = cmdline[:200] if len(cmdline) > 200 else cmdline
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    pass
+                
+                # CPU (non-blocking call)
+                snapshot.cpu_percent = proc.cpu_percent(interval=None)
+                
+                # Memory
+                mem_info = proc.memory_info()
+                snapshot.memory_rss = mem_info.rss
+                snapshot.memory_vms = mem_info.vms
+                snapshot.memory_percent = proc.memory_percent()
+                
+                # I/O
+                try:
+                    io_counters = proc.io_counters()
+                    snapshot.io_read_bytes = io_counters.read_bytes
+                    snapshot.io_write_bytes = io_counters.write_bytes
+                    snapshot.io_read_count = io_counters.read_count
+                    snapshot.io_write_count = io_counters.write_count
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    pass
+                
+                # Threads
+                snapshot.num_threads = proc.num_threads()
+                
+                # System context
+                snapshot.system_cpu_percent = psutil.cpu_percent(interval=None)
+                snapshot.system_memory_percent = psutil.virtual_memory().percent
+                
+            except psutil.NoSuchProcess:
+                # Process ended, try to find it again
+                self._claude_pid = None
+                return None
+            except psutil.AccessDenied:
+                pass
+        else:
+            # Fallback to /proc reading on Linux
+            try:
+                proc_dir = f"/proc/{self._claude_pid}"
+                if not os.path.exists(proc_dir):
+                    self._claude_pid = None
+                    return None
+                
+                # Process name
+                with open(f"{proc_dir}/comm", 'r') as f:
+                    snapshot.process_name = f.read().strip()
+                
+                # Memory from /proc/[pid]/status
+                with open(f"{proc_dir}/status", 'r') as f:
+                    for line in f:
+                        if line.startswith('VmRSS:'):
+                            snapshot.memory_rss = int(line.split()[1]) * 1024
+                        elif line.startswith('VmSize:'):
+                            snapshot.memory_vms = int(line.split()[1]) * 1024
+                        elif line.startswith('Threads:'):
+                            snapshot.num_threads = int(line.split()[1])
+                
+                # I/O from /proc/[pid]/io
+                try:
+                    with open(f"{proc_dir}/io", 'r') as f:
+                        for line in f:
+                            if line.startswith('read_bytes:'):
+                                snapshot.io_read_bytes = int(line.split()[1])
+                            elif line.startswith('write_bytes:'):
+                                snapshot.io_write_bytes = int(line.split()[1])
+                except PermissionError:
+                    pass
+                
+            except (FileNotFoundError, PermissionError, ValueError):
+                self._claude_pid = None
+                return None
+        
+        return snapshot
+    
+    def _generate_log_filename(self) -> str:
+        """Generate a log filename for the current session."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return os.path.join(
+            self.log_dir, 
+            f"{self.session_id}_{timestamp}_resource.jsonl"
+        )
+    
+    def start(self) -> str:
+        """
+        Start background resource monitoring.
+        
+        Returns:
+            Path to the log file being written
+        """
+        if self._monitoring:
+            return self._log_file or ""
+        
+        self._log_file = self._generate_log_filename()
+        self._monitoring = True
+        self._stop_event.clear()
+        self._snapshots = []
+        
+        # Open file for writing
+        if self.auto_save:
+            self._file_handle = open(self._log_file, 'w')
+        
+        def monitor_loop():
+            while not self._stop_event.is_set():
+                snapshot = self._capture_process_snapshot()
+                if snapshot:
+                    self._snapshots.append(snapshot)
+                    
+                    # Write to file immediately if auto_save
+                    if self.auto_save and self._file_handle:
+                        self._file_handle.write(snapshot.to_log_line() + "\n")
+                        self._file_handle.flush()
+                
+                self._stop_event.wait(self.interval)
+        
+        self._monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
+        self._monitor_thread.start()
+        
+        return self._log_file
+    
+    def stop(self) -> str:
+        """
+        Stop monitoring and finalize the log file.
+        
+        Returns:
+            Path to the saved log file
+        """
+        if not self._monitoring:
+            return self._log_file or ""
+        
+        self._stop_event.set()
+        if self._monitor_thread:
+            self._monitor_thread.join(timeout=2.0)
+        self._monitoring = False
+        
+        # Close file handle
+        if self._file_handle:
+            self._file_handle.close()
+            self._file_handle = None
+        
+        return self._log_file or ""
+    
+    def get_snapshots(self) -> List[ProcessResourceSnapshot]:
+        """Get all captured snapshots."""
+        return self._snapshots.copy()
+    
+    def get_log_file(self) -> Optional[str]:
+        """Get the current log file path."""
+        return self._log_file
+    
+    def get_summary(self) -> Dict[str, Any]:
+        """
+        Get summary statistics for captured data.
+        
+        Returns:
+            Dictionary with summary statistics
+        """
+        if not self._snapshots:
+            return {
+                "session_id": self.session_id,
+                "snapshot_count": 0,
+                "log_file": self._log_file,
+            }
+        
+        cpu_values = [s.cpu_percent for s in self._snapshots]
+        mem_values = [s.memory_rss for s in self._snapshots]
+        
+        first = self._snapshots[0]
+        last = self._snapshots[-1]
+        
+        return {
+            "session_id": self.session_id,
+            "log_file": self._log_file,
+            "start_time": first.timestamp.isoformat(),
+            "end_time": last.timestamp.isoformat(),
+            "duration_seconds": (last.timestamp - first.timestamp).total_seconds(),
+            "snapshot_count": len(self._snapshots),
+            "pid": first.pid,
+            "process_name": first.process_name,
+            "cpu": {
+                "avg_percent": sum(cpu_values) / len(cpu_values),
+                "max_percent": max(cpu_values),
+                "min_percent": min(cpu_values),
+            },
+            "memory": {
+                "avg_bytes": sum(mem_values) / len(mem_values),
+                "max_bytes": max(mem_values),
+                "min_bytes": min(mem_values),
+                "delta_bytes": last.memory_rss - first.memory_rss,
+            },
+            "io": {
+                "read_bytes": last.io_read_bytes - first.io_read_bytes,
+                "write_bytes": last.io_write_bytes - first.io_write_bytes,
+            },
+        }
+    
+    @classmethod
+    def load_from_file(cls, file_path: str) -> List[ProcessResourceSnapshot]:
+        """
+        Load resource snapshots from a log file.
+        
+        Args:
+            file_path: Path to the JSONL log file
+            
+        Returns:
+            List of ProcessResourceSnapshot objects
+        """
+        import json
+        snapshots = []
+        
+        with open(file_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        data = json.loads(line)
+                        snapshots.append(ProcessResourceSnapshot.from_dict(data))
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+        
+        return snapshots
+    
+    @classmethod
+    def list_log_files(cls, log_dir: Optional[str] = None, session_id: Optional[str] = None) -> List[str]:
+        """
+        List available resource log files.
+        
+        Args:
+            log_dir: Directory to search (default: ~/.claude-trace/resource-logs)
+            session_id: Optional filter by session ID
+            
+        Returns:
+            List of log file paths
+        """
+        log_dir = log_dir or cls.DEFAULT_LOG_DIR
+        
+        if not os.path.exists(log_dir):
+            return []
+        
+        files = []
+        for filename in os.listdir(log_dir):
+            if filename.endswith("_resource.jsonl"):
+                if session_id is None or filename.startswith(session_id):
+                    files.append(os.path.join(log_dir, filename))
+        
+        return sorted(files, reverse=True)  # Most recent first
+
+
+def align_resource_with_trace(
+    resource_snapshots: List[ProcessResourceSnapshot],
+    trace_events: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """
+    Align resource snapshots with trace events by timestamp.
+    
+    Args:
+        resource_snapshots: List of resource snapshots with timestamps
+        trace_events: List of trace events with timestamps
+        
+    Returns:
+        List of aligned events with resource data attached
+    """
+    if not resource_snapshots or not trace_events:
+        return trace_events
+    
+    from claude_trace.utils import parse_timestamp
+    
+    aligned = []
+    
+    for event in trace_events:
+        event_time = event.get("timestamp")
+        if isinstance(event_time, str):
+            event_time = parse_timestamp(event_time)
+        
+        # Find closest resource snapshot
+        closest_snapshot = None
+        min_diff = float('inf')
+        
+        for snapshot in resource_snapshots:
+            diff = abs((snapshot.timestamp - event_time).total_seconds())
+            if diff < min_diff:
+                min_diff = diff
+                closest_snapshot = snapshot
+        
+        # Attach resource data if within 5 seconds
+        event_with_resources = event.copy()
+        if closest_snapshot and min_diff <= 5.0:
+            event_with_resources["resource"] = {
+                "cpu_percent": closest_snapshot.cpu_percent,
+                "memory_rss": closest_snapshot.memory_rss,
+                "memory_percent": closest_snapshot.memory_percent,
+                "io_read_bytes": closest_snapshot.io_read_bytes,
+                "io_write_bytes": closest_snapshot.io_write_bytes,
+                "time_offset_seconds": min_diff,
+            }
+        
+        aligned.append(event_with_resources)
+    
+    return aligned

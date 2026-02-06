@@ -349,3 +349,265 @@ class TestGetResourceMonitorAvailability:
         # We should have some capability on Linux
         if os.path.exists("/proc"):
             assert has_any_capability
+
+
+class TestProcessResourceSnapshot:
+    """Tests for ProcessResourceSnapshot class."""
+    
+    def test_create_snapshot(self):
+        """Test creating a process resource snapshot."""
+        from claude_trace.resource_monitor import ProcessResourceSnapshot
+        
+        snapshot = ProcessResourceSnapshot(
+            timestamp=datetime.now(),
+            session_id="test-session",
+            pid=1234,
+            process_name="test_process",
+            cpu_percent=25.5,
+            memory_rss=1024 * 1024 * 100,  # 100 MB
+            memory_percent=5.0,
+        )
+        
+        assert snapshot.session_id == "test-session"
+        assert snapshot.pid == 1234
+        assert snapshot.cpu_percent == 25.5
+        assert snapshot.memory_rss == 1024 * 1024 * 100
+    
+    def test_snapshot_to_dict(self):
+        """Test converting snapshot to dictionary."""
+        from claude_trace.resource_monitor import ProcessResourceSnapshot
+        
+        snapshot = ProcessResourceSnapshot(
+            timestamp=datetime.now(),
+            session_id="test-session",
+            pid=1234,
+            process_name="test_process",
+            cpu_percent=25.5,
+        )
+        
+        data = snapshot.to_dict()
+        
+        assert data["session_id"] == "test-session"
+        assert data["pid"] == 1234
+        assert data["cpu_percent"] == 25.5
+        assert "timestamp" in data
+    
+    def test_snapshot_from_dict(self):
+        """Test creating snapshot from dictionary."""
+        from claude_trace.resource_monitor import ProcessResourceSnapshot
+        
+        original = ProcessResourceSnapshot(
+            timestamp=datetime.now(),
+            session_id="test-session",
+            pid=1234,
+            process_name="test_process",
+            cpu_percent=25.5,
+            memory_rss=1024000,
+        )
+        
+        data = original.to_dict()
+        restored = ProcessResourceSnapshot.from_dict(data)
+        
+        assert restored.session_id == original.session_id
+        assert restored.pid == original.pid
+        assert restored.cpu_percent == original.cpu_percent
+        assert restored.memory_rss == original.memory_rss
+    
+    def test_snapshot_to_log_line(self):
+        """Test converting snapshot to log line."""
+        from claude_trace.resource_monitor import ProcessResourceSnapshot
+        import json
+        
+        snapshot = ProcessResourceSnapshot(
+            timestamp=datetime.now(),
+            session_id="test-session",
+            pid=1234,
+        )
+        
+        log_line = snapshot.to_log_line()
+        
+        # Should be valid JSON
+        data = json.loads(log_line)
+        assert data["session_id"] == "test-session"
+        assert data["pid"] == 1234
+
+
+class TestClaudeProcessMonitor:
+    """Tests for ClaudeProcessMonitor class."""
+    
+    def test_create_monitor(self):
+        """Test creating a Claude process monitor."""
+        from claude_trace.resource_monitor import ClaudeProcessMonitor
+        
+        monitor = ClaudeProcessMonitor("test-session")
+        
+        assert monitor.session_id == "test-session"
+        assert monitor.interval == 1.0  # Default interval
+        assert monitor.auto_save == True
+        assert os.path.exists(monitor.log_dir)
+    
+    def test_start_and_stop_monitor(self):
+        """Test starting and stopping the monitor."""
+        from claude_trace.resource_monitor import ClaudeProcessMonitor
+        
+        monitor = ClaudeProcessMonitor("test-session-monitor", interval=0.2)
+        
+        # Start monitoring
+        log_file = monitor.start()
+        assert log_file is not None
+        assert os.path.exists(log_file)
+        
+        # Wait a bit
+        import time
+        time.sleep(0.5)
+        
+        # Stop monitoring
+        saved_file = monitor.stop()
+        assert saved_file == log_file
+        
+        # Clean up
+        if os.path.exists(log_file):
+            os.remove(log_file)
+    
+    def test_get_summary(self):
+        """Test getting monitor summary."""
+        from claude_trace.resource_monitor import ClaudeProcessMonitor
+        
+        monitor = ClaudeProcessMonitor("test-session-summary", interval=0.1)
+        
+        # Start and capture some data
+        monitor.start()
+        import time
+        time.sleep(0.5)
+        monitor.stop()
+        
+        summary = monitor.get_summary()
+        
+        assert summary["session_id"] == "test-session-summary"
+        assert "log_file" in summary
+        
+        # Clean up
+        if summary.get("log_file") and os.path.exists(summary["log_file"]):
+            os.remove(summary["log_file"])
+    
+    @pytest.fixture
+    def temp_log_dir(self):
+        """Create a temporary log directory."""
+        tmpdir = tempfile.mkdtemp()
+        yield tmpdir
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    
+    def test_load_from_file(self, temp_log_dir):
+        """Test loading snapshots from a log file."""
+        from claude_trace.resource_monitor import ClaudeProcessMonitor, ProcessResourceSnapshot
+        import json
+        
+        # Create a test log file
+        log_file = os.path.join(temp_log_dir, "test_resource.jsonl")
+        
+        snapshots_data = [
+            {
+                "timestamp": datetime.now().isoformat(),
+                "session_id": "test-session",
+                "pid": 1234,
+                "cpu_percent": 10.0,
+                "memory_rss": 1024000,
+            },
+            {
+                "timestamp": datetime.now().isoformat(),
+                "session_id": "test-session",
+                "pid": 1234,
+                "cpu_percent": 20.0,
+                "memory_rss": 2048000,
+            },
+        ]
+        
+        with open(log_file, 'w') as f:
+            for data in snapshots_data:
+                f.write(json.dumps(data) + "\n")
+        
+        # Load the file
+        snapshots = ClaudeProcessMonitor.load_from_file(log_file)
+        
+        assert len(snapshots) == 2
+        assert snapshots[0].cpu_percent == 10.0
+        assert snapshots[1].cpu_percent == 20.0
+    
+    def test_list_log_files(self, temp_log_dir):
+        """Test listing log files."""
+        from claude_trace.resource_monitor import ClaudeProcessMonitor
+        
+        # Create some test log files
+        for i in range(3):
+            log_file = os.path.join(temp_log_dir, f"session-{i}_20260101_000000_resource.jsonl")
+            with open(log_file, 'w') as f:
+                f.write("{}\n")
+        
+        files = ClaudeProcessMonitor.list_log_files(log_dir=temp_log_dir)
+        
+        assert len(files) == 3
+    
+    def test_list_log_files_filtered(self, temp_log_dir):
+        """Test listing log files with session filter."""
+        from claude_trace.resource_monitor import ClaudeProcessMonitor
+        
+        # Create test log files for different sessions with unique timestamps
+        for i, session in enumerate(["session-a", "session-a", "session-b"]):
+            log_file = os.path.join(temp_log_dir, f"{session}_20260101_00000{i}_resource.jsonl")
+            with open(log_file, 'w') as f:
+                f.write("{}\n")
+        
+        # Filter by session
+        files = ClaudeProcessMonitor.list_log_files(log_dir=temp_log_dir, session_id="session-a")
+        
+        assert len(files) == 2
+
+
+class TestAlignResourceWithTrace:
+    """Tests for align_resource_with_trace function."""
+    
+    def test_align_with_matching_timestamps(self):
+        """Test aligning resources with trace events."""
+        from claude_trace.resource_monitor import align_resource_with_trace, ProcessResourceSnapshot
+        
+        now = datetime.now()
+        
+        # Create resource snapshots
+        snapshots = [
+            ProcessResourceSnapshot(
+                timestamp=now,
+                session_id="test",
+                cpu_percent=10.0,
+                memory_rss=1024,
+            ),
+            ProcessResourceSnapshot(
+                timestamp=now + timedelta(seconds=2),
+                session_id="test",
+                cpu_percent=20.0,
+                memory_rss=2048,
+            ),
+        ]
+        
+        # Create trace events
+        events = [
+            {"timestamp": now.isoformat(), "event": "start"},
+            {"timestamp": (now + timedelta(seconds=2)).isoformat(), "event": "end"},
+        ]
+        
+        # Align
+        aligned = align_resource_with_trace(snapshots, events)
+        
+        assert len(aligned) == 2
+        assert "resource" in aligned[0]
+        assert aligned[0]["resource"]["cpu_percent"] == 10.0
+        assert aligned[1]["resource"]["cpu_percent"] == 20.0
+    
+    def test_align_with_no_matching_data(self):
+        """Test alignment when timestamps don't match."""
+        from claude_trace.resource_monitor import align_resource_with_trace
+        
+        # Empty resources
+        aligned = align_resource_with_trace([], [{"event": "test"}])
+        assert len(aligned) == 1
+        assert "resource" not in aligned[0]

@@ -736,6 +736,197 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_resource_start(args) -> int:
+    """Start background resource monitoring for Claude process."""
+    from claude_trace.resource_monitor import ClaudeProcessMonitor
+    
+    # Check if already monitoring
+    pid_file = os.path.expanduser(f"~/.claude-trace/.resource_monitor_{args.session_id}.pid")
+    if os.path.exists(pid_file):
+        print(f"Resource monitoring may already be running for session: {args.session_id}")
+        print(f"Use 'claude-trace resource-stop {args.session_id}' to stop it first.")
+        return 1
+    
+    # Start the monitor
+    monitor = ClaudeProcessMonitor(
+        args.session_id,
+        interval=args.interval,
+        auto_save=True
+    )
+    log_file = monitor.start()
+    
+    # Save monitor info for stop command
+    import json
+    monitor_info = {
+        "session_id": args.session_id,
+        "log_file": log_file,
+        "interval": args.interval,
+        "started_at": datetime.now().isoformat(),
+    }
+    
+    with open(pid_file, 'w') as f:
+        json.dump(monitor_info, f)
+    
+    print(f"Background resource monitoring started for session: {args.session_id}")
+    print(f"Log file: {log_file}")
+    print(f"Interval: {args.interval}s")
+    print(f"\nTo stop: claude-trace resource-stop {args.session_id}")
+    
+    if args.foreground:
+        # Run in foreground (blocking)
+        print("\nMonitoring Claude process... (Ctrl+C to stop)")
+        try:
+            import time
+            while True:
+                time.sleep(1)
+                snapshots = monitor.get_snapshots()
+                if snapshots:
+                    latest = snapshots[-1]
+                    print(f"\r[{latest.timestamp.strftime('%H:%M:%S')}] "
+                          f"CPU: {latest.cpu_percent:.1f}% | "
+                          f"Memory: {latest.memory_rss / 1024 / 1024:.1f}MB | "
+                          f"Threads: {latest.num_threads}", end="", flush=True)
+        except KeyboardInterrupt:
+            print("\n\nStopping monitor...")
+            monitor.stop()
+            os.remove(pid_file)
+            summary = monitor.get_summary()
+            print(f"\nSummary:")
+            print(f"  Snapshots: {summary['snapshot_count']}")
+            print(f"  Duration: {summary.get('duration_seconds', 0):.1f}s")
+            print(f"  Avg CPU: {summary.get('cpu', {}).get('avg_percent', 0):.1f}%")
+            print(f"  Avg Memory: {summary.get('memory', {}).get('avg_bytes', 0) / 1024 / 1024:.1f}MB")
+            print(f"  Log file: {log_file}")
+    
+    return 0
+
+
+def cmd_resource_stop(args) -> int:
+    """Stop background resource monitoring."""
+    pid_file = os.path.expanduser(f"~/.claude-trace/.resource_monitor_{args.session_id}.pid")
+    
+    if not os.path.exists(pid_file):
+        print(f"No resource monitoring found for session: {args.session_id}")
+        return 1
+    
+    import json
+    with open(pid_file, 'r') as f:
+        monitor_info = json.load(f)
+    
+    log_file = monitor_info.get("log_file", "")
+    
+    # Remove the pid file to signal stop
+    os.remove(pid_file)
+    
+    print(f"Resource monitoring stopped for session: {args.session_id}")
+    print(f"Log file: {log_file}")
+    
+    # Show summary if log file exists
+    if os.path.exists(log_file):
+        from claude_trace.resource_monitor import ClaudeProcessMonitor
+        snapshots = ClaudeProcessMonitor.load_from_file(log_file)
+        
+        if snapshots:
+            cpu_values = [s.cpu_percent for s in snapshots]
+            mem_values = [s.memory_rss for s in snapshots]
+            first = snapshots[0]
+            last = snapshots[-1]
+            
+            print(f"\nSummary:")
+            print(f"  Snapshots: {len(snapshots)}")
+            print(f"  Duration: {(last.timestamp - first.timestamp).total_seconds():.1f}s")
+            print(f"  Avg CPU: {sum(cpu_values) / len(cpu_values):.1f}%")
+            print(f"  Max Memory: {max(mem_values) / 1024 / 1024:.1f}MB")
+    
+    return 0
+
+
+def cmd_resource_import(args) -> int:
+    """Import resource logs from a file."""
+    from claude_trace.resource_monitor import ClaudeProcessMonitor
+    
+    if not os.path.exists(args.file):
+        print(f"File not found: {args.file}", file=sys.stderr)
+        return 1
+    
+    # Load snapshots from file
+    snapshots = ClaudeProcessMonitor.load_from_file(args.file)
+    
+    if not snapshots:
+        print(f"No valid resource data found in: {args.file}")
+        return 1
+    
+    # Store in database
+    storage = get_storage()
+    
+    # Save each snapshot as a resource snapshot
+    for snap in snapshots:
+        from claude_trace.resource_monitor import ResourceSnapshot
+        # Convert process snapshot to resource snapshot for storage
+        resource_snap = ResourceSnapshot(
+            timestamp=snap.timestamp,
+            session_id=args.session_id,
+            cpu_percent=snap.cpu_percent,
+            memory_used_bytes=snap.memory_rss,
+            memory_percent=snap.memory_percent,
+            process_memory_rss=snap.memory_rss,
+            process_memory_vms=snap.memory_vms,
+            disk_read_bytes=snap.io_read_bytes,
+            disk_write_bytes=snap.io_write_bytes,
+        )
+        storage.save_resource_snapshot(resource_snap)
+    
+    cpu_values = [s.cpu_percent for s in snapshots]
+    mem_values = [s.memory_rss for s in snapshots]
+    first = snapshots[0]
+    last = snapshots[-1]
+    
+    print(f"Imported resource data for session: {args.session_id}")
+    print(f"  Snapshots: {len(snapshots)}")
+    print(f"  Duration: {(last.timestamp - first.timestamp).total_seconds():.1f}s")
+    print(f"  Avg CPU: {sum(cpu_values) / len(cpu_values):.1f}%")
+    print(f"  Max Memory: {max(mem_values) / 1024 / 1024:.1f}MB")
+    
+    return 0
+
+
+def cmd_resource_logs(args) -> int:
+    """List available resource log files."""
+    from claude_trace.resource_monitor import ClaudeProcessMonitor
+    
+    log_files = ClaudeProcessMonitor.list_log_files(session_id=args.session_id)
+    
+    if not log_files:
+        print("No resource log files found.")
+        print(f"\nLog directory: {ClaudeProcessMonitor.DEFAULT_LOG_DIR}")
+        return 0
+    
+    print(f"Resource Log Files ({len(log_files)} found):")
+    print("")
+    
+    from claude_trace.utils import format_bytes, format_duration
+    
+    for log_file in log_files:
+        filename = os.path.basename(log_file)
+        file_size = os.path.getsize(log_file)
+        
+        # Try to get quick stats
+        try:
+            snapshots = ClaudeProcessMonitor.load_from_file(log_file)
+            if snapshots:
+                duration = (snapshots[-1].timestamp - snapshots[0].timestamp).total_seconds()
+                print(f"  {filename}")
+                print(f"    Size: {format_bytes(file_size)} | "
+                      f"Snapshots: {len(snapshots)} | "
+                      f"Duration: {format_duration(int(duration * 1000))}")
+            else:
+                print(f"  {filename} (empty)")
+        except Exception:
+            print(f"  {filename} ({format_bytes(file_size)})")
+    
+    return 0
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -1019,6 +1210,66 @@ def main():
         help="Output file path"
     )
     report_parser.set_defaults(func=cmd_report)
+    
+    # resource-start command - start background resource monitoring
+    resource_start_parser = subparsers.add_parser(
+        "resource-start",
+        help="Start background resource monitoring for Claude process"
+    )
+    resource_start_parser.add_argument(
+        "session_id",
+        help="Session ID to associate with resource logs"
+    )
+    resource_start_parser.add_argument(
+        "--interval", "-i",
+        type=float,
+        default=1.0,
+        help="Capture interval in seconds (default: 1.0)"
+    )
+    resource_start_parser.add_argument(
+        "--foreground", "-f",
+        action="store_true",
+        help="Run in foreground (blocking) with live output"
+    )
+    resource_start_parser.set_defaults(func=cmd_resource_start)
+    
+    # resource-stop command - stop background resource monitoring
+    resource_stop_parser = subparsers.add_parser(
+        "resource-stop",
+        help="Stop background resource monitoring"
+    )
+    resource_stop_parser.add_argument(
+        "session_id",
+        help="Session ID to stop monitoring for"
+    )
+    resource_stop_parser.set_defaults(func=cmd_resource_stop)
+    
+    # resource-import command - import resource logs from file
+    resource_import_parser = subparsers.add_parser(
+        "resource-import",
+        help="Import resource logs from a file into the database"
+    )
+    resource_import_parser.add_argument(
+        "session_id",
+        help="Session ID to associate with imported data"
+    )
+    resource_import_parser.add_argument(
+        "file",
+        help="Path to resource log file (JSONL format)"
+    )
+    resource_import_parser.set_defaults(func=cmd_resource_import)
+    
+    # resource-logs command - list available resource log files
+    resource_logs_parser = subparsers.add_parser(
+        "resource-logs",
+        help="List available resource log files"
+    )
+    resource_logs_parser.add_argument(
+        "session_id",
+        nargs="?",
+        help="Optional: filter by session ID"
+    )
+    resource_logs_parser.set_defaults(func=cmd_resource_logs)
     
     args = parser.parse_args()
     

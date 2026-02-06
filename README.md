@@ -212,7 +212,61 @@ The resource monitoring feature tracks local system resources (CPU, memory, netw
 - **Network**: Bytes sent/received, packets sent/received
 - **Disk I/O**: Read/write bytes
 
-### Using Resource Monitoring Programmatically
+### Background Process Monitoring
+
+The preferred way to capture resource data is using the **background process monitor**, which automatically monitors the Claude CLI process and saves timestamped data to log files:
+
+```python
+from claude_trace import ClaudeProcessMonitor
+
+# Start background monitoring for a session
+monitor = ClaudeProcessMonitor("my-session-id", interval=1.0)
+log_file = monitor.start()
+print(f"Monitoring started, log file: {log_file}")
+
+# ... Claude CLI runs, monitor captures process resources automatically ...
+
+# Stop monitoring when done
+monitor.stop()
+summary = monitor.get_summary()
+print(f"Captured {summary['snapshot_count']} snapshots")
+print(f"Avg CPU: {summary['cpu']['avg_percent']:.1f}%")
+print(f"Max Memory: {summary['memory']['max_bytes'] / 1024 / 1024:.1f}MB")
+```
+
+The monitor captures:
+- **Process-specific CPU usage**: Only Claude process, not whole system
+- **Process memory (RSS/VMS)**: Memory used by Claude
+- **Process I/O**: Disk read/write by Claude
+- **Thread count**: Number of threads in Claude process
+- **Timestamps**: For alignment with trace data
+
+### CLI Commands for Background Monitoring
+
+```bash
+# Start background monitoring for a session
+claude-trace resource-start <session_id>
+
+# Start with custom interval (0.5 seconds)
+claude-trace resource-start <session_id> --interval 0.5
+
+# Run in foreground with live output
+claude-trace resource-start <session_id> --foreground
+
+# Stop monitoring
+claude-trace resource-stop <session_id>
+
+# List available resource log files
+claude-trace resource-logs
+claude-trace resource-logs <session_id>  # Filter by session
+
+# Import resource logs into database
+claude-trace resource-import <session_id> /path/to/resource.jsonl
+```
+
+### Manual Stage Monitoring (Alternative)
+
+For more control, you can use the manual ResourceMonitor:
 
 ```python
 from claude_trace import ResourceMonitor, ResourceSnapshot
@@ -237,7 +291,7 @@ print(f"Avg CPU: {stage.avg_cpu_percent:.1f}%")
 summary = monitor.get_session_summary()
 ```
 
-### CLI Commands for Resource Data
+### Viewing Resource Data
 
 ```bash
 # View resource usage for a session
@@ -254,6 +308,26 @@ claude-trace report <session_id>
 
 # Generate HTML report with interactive timeline
 claude-trace report <session_id> --format html --output report.html
+```
+
+### Aligning Resource Data with Traces
+
+Resource snapshots are timestamped and can be automatically aligned with trace events:
+
+```python
+from claude_trace import ClaudeProcessMonitor, align_resource_with_trace
+
+# Load resource logs
+snapshots = ClaudeProcessMonitor.load_from_file("/path/to/resource.jsonl")
+
+# Align with trace events (from session.turns, etc.)
+trace_events = [
+    {"timestamp": "2025-02-04T10:30:00", "event": "turn_start"},
+    {"timestamp": "2025-02-04T10:30:15", "event": "tool_call"},
+]
+
+aligned = align_resource_with_trace(snapshots, trace_events)
+# Each event now has a "resource" field with CPU, memory, I/O data
 ```
 
 ### Unified Timeline Report
@@ -563,6 +637,7 @@ All trace data is stored locally:
 | `~/.claude-trace/hook.log` | Hook execution log |
 | `~/.claude-trace/otel-session-mapping.json` | Session-to-OTEL file mappings |
 | `~/.claude-trace/otel-metrics/` | Directory for OTEL metrics files |
+| `~/.claude-trace/resource-logs/` | Directory for process resource log files (JSONL) |
 
 ### Database Schema
 
@@ -576,6 +651,19 @@ The SQLite database includes these tables:
 - **`otel_session_summary`**: Aggregated OTEL metrics per session
 - **`resource_snapshots`**: Point-in-time resource usage measurements (CPU, memory, network, disk)
 - **`stage_resource_usage`**: Aggregated resource usage per stage/operation
+
+### Resource Log Files
+
+Resource log files are stored as JSONL (one JSON object per line) in `~/.claude-trace/resource-logs/`:
+
+```
+~/.claude-trace/resource-logs/
+├── abc-123-def_20250204_103000_resource.jsonl
+├── xyz-456-ghi_20250204_113000_resource.jsonl
+└── ...
+```
+
+Each line contains a `ProcessResourceSnapshot` with timestamp, PID, CPU, memory, and I/O data.
 
 ## Environment Variables
 
