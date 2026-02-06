@@ -164,6 +164,19 @@ class TestStageResourceUsage:
         
         assert stage.duration_ms == 100
     
+    def test_duration_calculation_without_end_time(self):
+        """Test that duration_ms returns None when end_time is not set."""
+        stage = StageResourceUsage(
+            session_id="test-session",
+            stage_id="stage-1",
+            stage_name="test_stage",
+            start_time=datetime.now()
+        )
+        
+        # Without end_time, duration should be None
+        assert stage.end_time is None
+        assert stage.duration_ms is None
+    
     def test_to_dict(self):
         """Test converting stage to dictionary."""
         stage = StageResourceUsage(

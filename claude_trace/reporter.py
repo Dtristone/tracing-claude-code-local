@@ -975,8 +975,7 @@ class TraceReporter:
             
             stages_json.append(stage_data)
         
-        import json as json_module
-        stages_json_str = json_module.dumps(stages_json, indent=2)
+        stages_json_str = json.dumps(stages_json, indent=2)
         
         # Resource summary
         resource_summary = {}
@@ -993,10 +992,10 @@ class TraceReporter:
                 "disk_write": rs.get("disk", {}).get("write_bytes", 0),
             }
         
-        resource_summary_str = json_module.dumps(resource_summary, indent=2)
+        resource_summary_str = json.dumps(resource_summary, indent=2)
         
         # OTEL summary
-        otel_summary_str = json_module.dumps(otel_data or {}, indent=2)
+        otel_summary_str = json.dumps(otel_data or {}, indent=2)
         
         html = f"""<!DOCTYPE html>
 <html lang="en">

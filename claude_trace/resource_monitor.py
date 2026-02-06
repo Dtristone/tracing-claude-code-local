@@ -87,8 +87,13 @@ class ResourceSnapshot:
         return snapshot
     
     def _capture_with_psutil(self):
-        """Capture metrics using psutil library."""
-        # CPU metrics
+        """
+        Capture metrics using psutil library.
+        
+        Note: This method has a 0.1 second blocking delay for CPU time measurement.
+        For high-frequency monitoring, consider using non-blocking alternatives.
+        """
+        # CPU metrics (0.1s blocking delay for accurate CPU percentage)
         cpu_times = psutil.cpu_times_percent(interval=0.1)
         self.cpu_percent = psutil.cpu_percent(interval=None)
         self.cpu_user_percent = cpu_times.user
