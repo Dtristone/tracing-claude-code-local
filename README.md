@@ -20,6 +20,7 @@ A **100% local** tracing and observability solution for [Claude Code CLI](https:
 - [Automatic OTEL Metrics Integration](#automatic-otel-metrics-integration)
 - [CLI Command Reference](#cli-command-reference)
 - [OTEL Commands](#otel-commands)
+- [How Metrics Are Computed](#how-metrics-are-computed)
 - [Output Examples](#output-examples)
 - [Data Storage](#data-storage)
 - [Environment Variables](#environment-variables)
@@ -357,6 +358,42 @@ claude-trace otel-mapping generate-path <session_id>
 claude-trace otel-auto <session_id>
 claude-trace otel-auto <session_id> --description "Auto-generated for hook"
 ```
+
+## How Metrics Are Computed
+
+This section explains exactly where each metric comes from and how the time values are calculated.
+
+### Data Sources
+
+`claude-trace` computes metrics from two local sources:
+
+1. **Claude Code transcript JSONL** (primary source)
+   - Parsed by `claude_trace/collector.py`
+   - Provides session/turn/message timestamps, tool calls, tool results, and transcript token usage
+2. **OTEL console output** (optional enrichment source)
+   - Parsed by `claude_trace/otel_collector.py`
+   - Used mainly to enrich token/API metrics when transcript token counts are missing or zero
+
+Both sources are stored locally in SQLite (`~/.claude-trace/traces.db`) via `claude_trace/storage.py`.
+
+### Where Computation Happens
+
+- **Session stats computation**: `claude_trace/analyzer.py` in `analyze_session(...)`
+- **Time breakdown computation**: `claude_trace/analyzer.py` in `get_time_breakdown(...)`
+- **OTEL-enriched stats path**: `claude_trace/analyzer.py` in `analyze_session_with_otel(...)`
+
+### Time Metrics Formula
+
+- `tool_time_ms` = sum of all tool durations in the session
+- `total_duration_ms` = session duration from transcript timestamps
+- `model_time_ms` = `max(0, total_duration_ms - tool_time_ms)` (estimated non-tool time)
+
+### About the `task` Tool (Subagent) Timing
+
+- The `task` tool is treated as a normal tool call based on transcript events.
+- Its duration is included inside **Tool Execution** (`tool_time_ms`), not as a separate "task bucket".
+- Reported **Model Inference** time is computed after subtracting total tool time, so by definition it does **not** overlap with the reported tool time.
+- If a `task` call internally performs subagent model/tool work, that internal detail is currently represented only by the outer `task` call duration unless separate transcript tool events are present.
 
 ## Output Examples
 
